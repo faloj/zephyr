@@ -37,3 +37,7 @@
 		status = "okay";
 	};
 };
+
+&usbotg0 {
+	status = "okay";
+};
