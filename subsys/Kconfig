@@ -1,6 +1,6 @@
 # Subsystem configuration options
 
-# Copyright (c) 2016-2017 Intel Corporation
+# Copyright (c) 2016-2023 Intel Corporation
 # Copyright (c) 2021 Nordic Semiconductor
 # SPDX-License-Identifier: Apache-2.0
 
@@ -43,6 +43,7 @@ source "subsys/tracing/Kconfig"
 source "subsys/usb/device/Kconfig"
 source "subsys/usb/device_next/Kconfig"
 source "subsys/usb/host/Kconfig"
+source "subsys/usb/host/class/Kconfig"
 source "subsys/usb/usb_c/Kconfig"
 source "subsys/zbus/Kconfig"
 source "subsys/sip_svc/Kconfig"

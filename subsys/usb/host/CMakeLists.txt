@@ -1,4 +1,5 @@
 # Copyright (c) 2022 Nordic Semiconductor ASA
+# Copyright (c) 2023 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 zephyr_library()
@@ -16,3 +17,5 @@ zephyr_library_sources_ifdef(
 )
 
 zephyr_linker_sources(DATA_SECTIONS usbh_data.ld)
+
+add_subdirectory_ifdef(CONFIG_USB_HOST_CLASS_DRIVER class)
