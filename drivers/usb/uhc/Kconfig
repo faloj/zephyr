@@ -47,5 +47,6 @@ source "subsys/logging/Kconfig.template.log_config"
 source "drivers/usb/uhc/Kconfig.max3421e"
 source "drivers/usb/uhc/Kconfig.virtual"
 source "drivers/usb/uhc/Kconfig.dwc"
+source "drivers/usb/uhc/Kconfig.dwc_stm32"
 
 endif # UHC_DRIVER

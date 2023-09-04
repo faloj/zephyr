@@ -167,7 +167,7 @@ static int bazfoo_resumed(struct usbh_contex *const uhs_ctx)
 
 	return 0;
 }
-
+/*
 USBH_DEFINE_CLASS(bazfoo) = {
 	.request = bazfoo_request,
 	.connected = bazfoo_connected,
@@ -176,7 +176,7 @@ USBH_DEFINE_CLASS(bazfoo) = {
 	.suspended = bazfoo_suspended,
 	.resumed = bazfoo_resumed,
 };
-
+*/
 static uint8_t vreq_test_buf[1024];
 
 static int cmd_bulk(const struct shell *sh, size_t argc, char **argv)

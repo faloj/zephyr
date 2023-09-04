@@ -58,6 +58,11 @@ int usb2_disk_access_status(struct disk_info *disk)
 int usb2_disk_access_init(struct disk_info *disk)
 {
 	ARG_UNUSED(disk);
+
+	int ret = -EIO;
+
+	ret = usbh_disk_access_init(0);
+
 	return 0;
 }
 
