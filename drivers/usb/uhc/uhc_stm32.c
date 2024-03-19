@@ -41,6 +41,17 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 #define DT_PHY_COMPAT_EMBEDDED_HS st_stm32_usbphyc
 #define DT_PHY_COMPAT_ULPI        usb_ulpi_phy
 
+#define SETUP_PACKET_SIZE (8U)
+
+#define DEFAULT_CTRL_PIPE_OUT (0U)
+#define DEFAULT_CTRL_PIPE_IN  (1U)
+#define DEFAULT_BULK_PIPE_IN  (2U)
+#define DEFAULT_BULK_PIPE_OUT (3U)
+
+#define NB_MAX_PIPE (16U)
+
+BUILD_ASSERT(NB_MAX_PIPE <= UINT8_MAX);
+
 enum dt_speed {
 	/* Values are fixed by maximum-speed enum values order in
 	 * usb-controller.yaml dts binding file
@@ -70,6 +81,10 @@ enum phy_type {
 struct uhc_stm32_data {
 	HCD_HandleTypeDef hcd;
 	struct k_event event_set;
+	struct uhc_transfer *ongoing_xfer;
+	bool busy_pipe[NB_MAX_PIPE];
+	uint8_t control_out_pipe;
+	uint8_t control_in_pipe;
 };
 
 struct uhc_stm32_config {
@@ -77,7 +92,7 @@ struct uhc_stm32_config {
 	enum phy_type phy;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	enum dt_speed max_speed;
-	struct pinctrl_dev_config *pcfg;
+	const struct pinctrl_dev_config *pcfg;
 	struct gpio_dt_spec ulpi_reset_gpio;
 	struct gpio_dt_spec vbus_enable_gpio;
 };
@@ -86,6 +101,8 @@ typedef enum {
 	UHC_STM32_DEVICE_CONNECTED = 0,
 	UHC_STM32_BUS_RESETED = 1,
 	UHC_STM32_DEVICE_DISCONNECTED = 2,
+	UHC_STM32_SOF = 3,
+	UHC_STM32_NEW_XFER = 4,
 } uhc_stm32_event_t;
 
 #define EVENT_BIT(event) (0x1 << event)
@@ -142,7 +159,11 @@ static void uhc_stm32_irq(const struct device *dev)
 
 void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
 {
-	/* const struct device *dev = (const struct device*) hhcd->pData; */
+	const struct device *dev = (const struct device *)hhcd->pData;
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	/* Let the driver thread know a device is connected */
+	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_SOF));
 }
 
 void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
@@ -386,6 +407,118 @@ static int uhc_stm32_init(const struct device *dev)
 	return 0;
 }
 
+/**
+  * @brief  Initialize a host channel.
+  * @param  hhcd HCD handle
+  * @param  ch_num Channel number.
+  *         This parameter can be a value from 1 to 15
+  * @param  epnum Endpoint number.
+  *          This parameter can be a value from 1 to 15
+  * @param  dev_address Current device address
+  *          This parameter can be a value from 0 to 255
+  * @param  speed Current device speed.
+  *          This parameter can be one of these values:
+  *            HCD_DEVICE_SPEED_HIGH: High speed mode,
+  *            HCD_DEVICE_SPEED_FULL: Full speed mode,
+  *            HCD_DEVICE_SPEED_LOW: Low speed mode
+  * @param  ep_type Endpoint Type.
+  *          This parameter can be one of these values:
+  *            EP_TYPE_CTRL: Control type,
+  *            EP_TYPE_ISOC: Isochronous type,
+  *            EP_TYPE_BULK: Bulk type,
+  *            EP_TYPE_INTR: Interrupt type
+  * @param  mps Max Packet Size.
+  *          This parameter can be a value from 0 to32K
+  * @retval HAL status
+  */
+HAL_StatusTypeDef HAL_HCD_HC_Init(HCD_HandleTypeDef *hhcd, uint8_t ch_num, uint8_t epnum,
+                                  uint8_t dev_address, uint8_t speed, uint8_t ep_type, uint16_t mps);
+
+static int uhc_stm32_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
+							   uint8_t dev_addr, uint8_t speed, uint8_t ep_type, uint16_t mps)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	// TODO: change this
+	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+
+	bool found = false;
+
+	size_t i;
+	for(i = 0; i < nb_max_pipe; i++) {
+		if (priv->busy_pipe[i] == false) {
+			*pipe_id = i;
+			found = true;
+			break;
+		}
+	}
+
+	if (found == false) {
+		return -ENODEV;
+	}
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_Init(&(priv->hcd),
+		*pipe_id, USB_EP_GET_IDX(ep),
+        dev_addr, speed,
+		ep_type, mps
+	);
+	if (status != HAL_OK) {
+		return -EIO;
+	}
+
+	priv->busy_pipe[i] = true;
+	return 0;
+}
+
+static int uhc_stm32_close_pipe(const struct device *dev, uint8_t pipe_id)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	// TODO: change this
+	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+
+	if (pipe_id > nb_max_pipe) {
+		return -EINVAL;
+	}
+
+	if (priv->busy_pipe[pipe_id] != true) {
+		return -EALREADY;
+	}
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_Halt(&(priv->hcd), pipe_id);
+	if (status != HAL_OK) {
+		return -EIO;
+	}
+
+	priv->busy_pipe[pipe_id] = false;
+
+	return 0;
+}
+
+static inline void uhc_stm32_init_pipes(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	// TODO: change this
+	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+
+	size_t i;
+	for(i = 0; i < nb_max_pipe; i++) {
+		priv->busy_pipe[i] = false;
+	}
+}
+
+static inline void uhc_stm32_deinit_pipes(const struct device *dev)
+{
+	// TODO: change this
+	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+
+	size_t i;
+	for(i = 0; i < nb_max_pipe; i++) {
+		uhc_stm32_close_pipe(dev, i);
+	}
+}
+
 static int uhc_stm32_enable(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -409,6 +542,8 @@ static int uhc_stm32_enable(const struct device *dev)
 		}
 	}
 
+	uhc_stm32_init_pipes(dev);
+
 	return 0;
 }
 
@@ -416,6 +551,8 @@ static int uhc_stm32_disable(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
+
+	uhc_stm32_deinit_pipes(dev);
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
@@ -464,6 +601,8 @@ static int uhc_stm32_shutdown(const struct device *dev)
 	return 0;
 }
 
+// TODO : ensure atomicity of operations
+
 static int uhc_stm32_bus_reset(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -475,33 +614,297 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 
 static int uhc_stm32_sof_enable(const struct device *dev)
 {
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+
+	if (!READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP) &&
+	    !READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
+		return 0;
+		return -EALREADY;
+	}
+
 	/* TODO */
 	return 0;
 }
 
 static int uhc_stm32_bus_suspend(const struct device *dev)
 {
-	/* TODO */
-	/* uhc_submit_event(dev, UHC_EVT_SUSPENDED, 0, NULL); */
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+
+	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP)) {
+		return -EALREADY;
+	}
+
+	SET_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP);
+
+	uhc_submit_event(dev, UHC_EVT_SUSPENDED, 0);
+
 	return 0;
 }
 
 static int uhc_stm32_bus_resume(const struct device *dev)
 {
-	/* TODO */
-	/* uhc_submit_event(dev, UHC_EVT_RESUMED, 0, NULL); */
+	// TODO : handle WKUPIN into IRQ handler
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+
+	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
+		return -EBUSY;
+	}
+
+	SET_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES);
+
+	// USB specs says resume must be driven at least 20ms
+	k_msleep(20 + 1);
+
+	CLEAR_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES);
+
+	uhc_submit_event(dev, UHC_EVT_RESUMED, 0);
+
 	return 0;
 }
 
 static int uhc_stm32_ep_enqueue(const struct device *dev, struct uhc_transfer *const xfer)
 {
-	return uhc_xfer_append(dev, xfer);
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	xfer->stage = UHC_CONTROL_STAGE_SETUP;
+
+	int err = uhc_xfer_append(dev, xfer);
+	if (err) {
+		return err;
+	}
+
+	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_NEW_XFER));
+
+	return 0;
 }
 
 static int uhc_stm32_ep_dequeue(const struct device *dev, struct uhc_transfer *const xfer)
 {
 	/* TODO */
 	return 0;
+}
+
+/** TODO: remove/transform
+  * @brief  Submit a new URB for processing.
+  * @param  hhcd HCD handle
+  * @param  ch_num Channel number.
+  *         This parameter can be a value from 1 to 15
+  * @param  direction Channel number.
+  *          This parameter can be one of these values:
+  *           0 : Output / 1 : Input
+  * @param  ep_type Endpoint Type.
+  *          This parameter can be one of these values:
+  *            EP_TYPE_CTRL: Control type/
+  *            EP_TYPE_ISOC: Isochronous type/
+  *            EP_TYPE_BULK: Bulk type/
+  *            EP_TYPE_INTR: Interrupt type/
+  * @param  token Endpoint Type.
+  *          This parameter can be one of these values:
+  *            0: HC_PID_SETUP / 1: HC_PID_DATA1
+  * @param  pbuff pointer to URB data
+  * @param  length Length of URB data
+  * @param  do_ping activate do ping protocol (for high speed only).
+  *          This parameter can be one of these values:
+  *           0 : do ping inactive / 1 : do ping active
+  * @retval HAL status
+  */
+static inline int uhc_stm32_submit_request(const struct device *dev,
+										   uint8_t chan_num,
+										   uint8_t direction,
+										   uint8_t ep_type,
+										   uint8_t token,
+										   uint8_t *buf,
+										   uint16_t length)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(&priv->hcd,
+		chan_num, direction, ep_type, token, buf, length, 0
+	);
+
+	if (status == HAL_OK) {
+		return 0;
+	} else {
+		return -ECANCELED;
+	}
+}
+
+static inline int uhc_stm32_send_control_setup(const struct device *dev,
+											   const uint8_t chan_num,
+											   uint8_t *buf,
+											   uint16_t length)
+{
+	if (length != SETUP_PACKET_SIZE) {
+		return -EINVAL;
+	}
+
+	return uhc_stm32_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
+}
+
+static int uhc_stm32_send_data(const struct device *dev,
+							   const uint8_t chan_num,
+							   struct net_buf *const buf,
+							   const uint8_t ep_type,
+							   const uint8_t maximum_packet_size)
+{
+	return uhc_stm32_submit_request(dev,
+		chan_num,
+		0,
+		ep_type,
+		1,
+		buf->data,
+		MIN(buf->len, maximum_packet_size));
+}
+
+static int uhc_stm32_receive_data(const struct device *dev,
+								  const uint8_t chan_num,
+								  struct net_buf *const buf,
+								  const uint8_t ep_type,
+								  const uint8_t maximum_packet_size)
+{
+	return uhc_stm32_submit_request(dev,
+		chan_num,
+		1,
+		ep_type,
+		1,
+		net_buf_tail(buf),
+		MIN(net_buf_tailroom(buf), maximum_packet_size));
+}
+
+static int uhc_stm32_send_control_status(const struct device *dev, const uint8_t chan_num)
+{
+	return uhc_stm32_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
+}
+
+static int uhc_stm32_receive_control_status(const struct device *dev, const uint8_t chan_num)
+{
+	return uhc_stm32_submit_request(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
+}
+
+static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer *const xfer)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	/* Just restart if device NAKed packet */
+	/*if () {
+		return ;
+	}*/
+
+	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+		//LOG_DBG("Handle SETUP stage");
+		//struct usb_setup_packet *p_setup = (struct usb_setup_packet *) xfer->setup_pkt;
+		/*if (xfer->setup_pkt[1] == USB_SREQ_CLEAR_FEATURE) {
+			if (USB_EP_DIR_IS_IN(xfer->ep)) {
+				priv->hcd.hc[0].toggle_in = 0;
+				LOG_DBG("resetting IN toggle");
+			} else {
+				priv->hcd.hc[0].toggle_in = 0;
+				priv->hcd.hc[0].toggle_out ^= 1;
+				LOG_DBG("resetting IN/OUT toggle");
+			}
+		}*/
+		return uhc_stm32_send_control_setup(dev,
+			priv->control_out_pipe,
+			xfer->setup_pkt,
+			sizeof(xfer->setup_pkt)
+		);
+	}
+
+	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
+		if (USB_EP_DIR_IS_IN(xfer->ep)) {
+			LOG_DBG("Handle DATA stage: receive");
+			return uhc_stm32_receive_data(dev, priv->control_in_pipe, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
+		} else {
+			LOG_DBG("Handle DATA stage: send");
+			return uhc_stm32_send_data(dev, priv->control_out_pipe, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
+		}
+		// TODO: net_buf_pull(buf, len) somewere;
+	}
+
+	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+		LOG_DBG("Handle STATUS stage");
+		if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		LOG_DBG("Handle STATUS stage: send");
+			return uhc_stm32_send_control_status(dev, priv->control_out_pipe);
+		} else {
+		LOG_DBG("Handle STATUS stage: receive");
+			return uhc_stm32_receive_control_status(dev, priv->control_in_pipe);
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int uhc_stm32_xfer_bulk(const struct device *dev, struct uhc_transfer *const xfer)
+{
+	//struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	return 0;
+
+}
+
+static int uhc_stm32_schedule_xfer(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	//LOG_DBG("schedule");
+
+	if (priv->ongoing_xfer == NULL) {
+		priv->ongoing_xfer = uhc_xfer_get_next(dev);
+		if (priv->ongoing_xfer == NULL) {
+			LOG_DBG("Nothing to transfer");
+			return 0;
+		}
+	}
+
+	/* TODO: support all sort of transfers */
+
+	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
+		HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
+		if (hc_state != HC_IDLE) {
+			LOG_DBG("AA ! hc_state = %d", hc_state);
+		}
+		//return uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
+		size_t cpt = 0;
+		while (cpt < 3) {
+			HCD_URBStateTypeDef urb_state = URB_NOTREADY;
+			while (urb_state == URB_NOTREADY) {
+				int err = uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
+				if (err != 0) {
+					LOG_DBG("OO ! err = %d", err);
+					return err;
+				}
+				hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
+				if (hc_state != HC_IDLE) {
+					LOG_DBG("AA ! hc_state = %d", hc_state);
+				}
+				do {
+					urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
+				} while (urb_state == URB_IDLE);
+				LOG_DBG("AA ? urb_state = %d", urb_state);
+			}
+			if (urb_state == URB_ERROR) {
+				LOG_DBG("error will retry");
+				cpt++;
+			} else {
+				LOG_DBG("OK ? urb_state = %d", urb_state);
+				return 0;
+			}
+		}
+		//priv->ongoing_xfer->stage++;
+		//uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
+		//priv->ongoing_xfer->stage++;
+		//uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
+		return 0;
+	}
+
+	return uhc_stm32_xfer_bulk(dev, priv->ongoing_xfer);
 }
 
 void uhc_stm32_thread(const struct device *dev)
@@ -536,7 +939,7 @@ void uhc_stm32_thread(const struct device *dev)
 				hs_negociation_reset_ongoing = false;
 			} else {
 				/* Let higher level code know a reset occurred */
-				uhc_submit_event(dev, UHC_EVT_RESETED, 0, NULL);
+				uhc_submit_event(dev, UHC_EVT_RESETED, 0);
 			}
 
 			/* A reset occurred, retrieve negotiated speed to inform higher level
@@ -546,14 +949,39 @@ void uhc_stm32_thread(const struct device *dev)
 
 			switch (current_speed) {
 				case SPEED_LOW: {
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_LS, 0, NULL);
+					LOG_DBG("LS");
+					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_LS, 0);
 				} break;
 				case SPEED_FULL: {
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_FS, 0, NULL);
+					LOG_DBG("FS");
+					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_FS, 0);
 				} break;
 				case SPEED_HIGH: {
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_HS, 0, NULL);
+					LOG_DBG("HS");
+					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_HS, 0);
 				} break;
+			}
+
+			int err = 0;
+
+			// TODO : this open pipe thing is temporary
+			uint8_t pipe_speed = SPEED_LOW;
+			if (current_speed == SPEED_LOW) {
+				pipe_speed = HCD_DEVICE_SPEED_LOW;
+			} else if (current_speed == SPEED_FULL) {
+				pipe_speed = HCD_DEVICE_SPEED_FULL;
+			} else if (current_speed == SPEED_HIGH) {
+				pipe_speed = HCD_DEVICE_SPEED_HIGH;
+			}
+			err = uhc_stm32_open_pipe(dev, &(priv->control_out_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 40);
+			if (err) {
+				LOG_ERR("Failed to open control pipe out channel");
+				__ASSERT_NO_MSG(0);
+			}
+			err = uhc_stm32_open_pipe(dev, &(priv->control_in_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 40);
+			if (err) {
+				LOG_ERR("Failed to open control pipe in channel");
+				__ASSERT_NO_MSG(0);
 			}
 		}
 
@@ -562,7 +990,41 @@ void uhc_stm32_thread(const struct device *dev)
 			hs_negociation_reset_ongoing = false;
 
 			/* Let higher level code know a reset occurred */
-			uhc_submit_event(dev, UHC_EVT_DEV_REMOVED, 0, NULL);
+			uhc_submit_event(dev, UHC_EVT_DEV_REMOVED, 0);
+		}
+
+		if (events & EVENT_BIT(UHC_STM32_SOF)) {
+			HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
+			HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
+			if (urb_state != 0 || hc_state != 0) {
+				LOG_DBG("urb_state = %d, hc_state = %d", urb_state, hc_state);
+			}
+			if (HAL_HCD_HC_GetURBState(&(priv->hcd), 0) == URB_DONE &&
+			    //HAL_HCD_HC_GetState(&(priv->hcd), 0) == HC_HALTED &&
+			    priv->ongoing_xfer != NULL) {
+				priv->ongoing_xfer->stage++;
+				LOG_DBG("Next stage !");
+				if (priv->ongoing_xfer->stage > UHC_CONTROL_STAGE_STATUS) {
+					uhc_xfer_return(dev, priv->ongoing_xfer, 0);
+					priv->ongoing_xfer = NULL;
+				} else {
+					int err = uhc_stm32_schedule_xfer(dev);
+					if (err) {
+						// TODO
+						LOG_DBG("AARRGGG");
+					}
+				}
+			}
+		}
+
+		if (events & EVENT_BIT(UHC_STM32_NEW_XFER)) {
+			// TODO: this is just for tests must handle it properly
+			LOG_DBG("will send");
+			int err = uhc_stm32_schedule_xfer(dev);
+			if (err) {
+				// TODO
+				LOG_DBG("AARRGGG");
+			}
 		}
 	}
 }
@@ -632,6 +1094,11 @@ static int uhc_stm32_driver_init0(const struct device *dev)
 		data->caps.hs = 1;
 	} else {
 		data->caps.hs = 0;
+	}
+
+	if (DT_INST_PROP(0, num_host_channels) > NB_MAX_PIPE) {
+		__ASSERT_NO_MSG(0);
+		return -EINVAL;
 	}
 
 	k_event_init(&priv->event_set);
