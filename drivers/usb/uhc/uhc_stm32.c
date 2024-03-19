@@ -52,6 +52,8 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 BUILD_ASSERT(NB_MAX_PIPE <= UINT8_MAX);
 
+#define UHC_STM32_MAX_ERR (3U)
+
 enum dt_speed {
 	/* Values are fixed by maximum-speed enum values order in
 	 * usb-controller.yaml dts binding file
@@ -82,6 +84,7 @@ struct uhc_stm32_data {
 	HCD_HandleTypeDef hcd;
 	struct k_event event_set;
 	struct uhc_transfer *ongoing_xfer;
+	size_t ongoing_xfer_err_cpt;
 	bool busy_pipe[NB_MAX_PIPE];
 	uint8_t control_out_pipe;
 	uint8_t control_in_pipe;
@@ -103,6 +106,7 @@ typedef enum {
 	UHC_STM32_DEVICE_DISCONNECTED = 2,
 	UHC_STM32_SOF = 3,
 	UHC_STM32_NEW_XFER = 4,
+	UHC_STM32_URB_UPDATE = 5,
 } uhc_stm32_event_t;
 
 #define EVENT_BIT(event) (0x1 << event)
@@ -201,7 +205,14 @@ void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 					 HCD_URBStateTypeDef urb_state)
 {
+	const struct device *dev = (const struct device *)hhcd->pData;
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	LOG_DBG("URB callback chnum = %d, urb_state = %d", chnum, urb_state);
 	/* const struct device *dev = (const struct device*) hhcd->pData; */
+
+	/* Let the driver thread know something have changed */
+	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 }
 
 static inline void priv_hcd_prepare(const struct device *dev)
@@ -797,7 +808,7 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	}*/
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		//LOG_DBG("Handle SETUP stage");
+		LOG_DBG("Handle SETUP stage");
 		//struct usb_setup_packet *p_setup = (struct usb_setup_packet *) xfer->setup_pkt;
 		/*if (xfer->setup_pkt[1] == USB_SREQ_CLEAR_FEATURE) {
 			if (USB_EP_DIR_IS_IN(xfer->ep)) {
@@ -861,50 +872,94 @@ static int uhc_stm32_schedule_xfer(const struct device *dev)
 			LOG_DBG("Nothing to transfer");
 			return 0;
 		}
+		priv->ongoing_xfer_err_cpt = 0;
 	}
 
 	/* TODO: support all sort of transfers */
 
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
-		HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
-		if (hc_state != HC_IDLE) {
-			LOG_DBG("AA ! hc_state = %d", hc_state);
-		}
-		//return uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
-		size_t cpt = 0;
-		while (cpt < 3) {
-			HCD_URBStateTypeDef urb_state = URB_NOTREADY;
-			while (urb_state == URB_NOTREADY) {
-				int err = uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
-				if (err != 0) {
-					LOG_DBG("OO ! err = %d", err);
-					return err;
-				}
-				hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
-				if (hc_state != HC_IDLE) {
-					LOG_DBG("AA ! hc_state = %d", hc_state);
-				}
-				do {
-					urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
-				} while (urb_state == URB_IDLE);
-				LOG_DBG("AA ? urb_state = %d", urb_state);
-			}
-			if (urb_state == URB_ERROR) {
-				LOG_DBG("error will retry");
-				cpt++;
-			} else {
-				LOG_DBG("OK ? urb_state = %d", urb_state);
-				return 0;
-			}
-		}
-		//priv->ongoing_xfer->stage++;
-		//uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
-		//priv->ongoing_xfer->stage++;
-		//uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
-		return 0;
+		return uhc_stm32_xfer_control(dev, priv->ongoing_xfer);
 	}
 
 	return uhc_stm32_xfer_bulk(dev, priv->ongoing_xfer);
+}
+
+static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct device * dev) {
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	HCD_URBStateTypeDef urb_state = URB_IDLE;
+
+	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
+		if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+			urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), priv->control_out_pipe);
+		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
+			if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep)) {
+				urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), priv->control_in_pipe);
+			} else {
+				urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), priv->control_out_pipe);
+			}
+		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+			if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep)) {
+				urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), priv->control_out_pipe);
+			} else {
+				urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), priv->control_in_pipe);
+			}
+		} else {
+			// TODO: not reachable
+			__ASSERT_NO_MSG(0);
+		}
+	} else {
+		// TODO
+	}
+
+	return urb_state;
+}
+
+static void uhc_stm32_xfer_end(const struct device *dev, const int err) {
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	uhc_xfer_return(dev, priv->ongoing_xfer, err);
+	priv->ongoing_xfer = NULL;
+	priv->ongoing_xfer_err_cpt = 0;
+}
+
+static void uhc_stm32_xfer_update(const struct device *dev) {
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	if (priv->ongoing_xfer == NULL) {
+		return;
+	}
+
+	HCD_URBStateTypeDef urb_state = uhc_stm32_get_ongoing_xfer_urb_state(dev);
+
+	if (urb_state == URB_DONE) {
+		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
+			if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+				if (priv->ongoing_xfer->buf != NULL) {
+					priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_DATA;
+				} else {
+					priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+				}
+			} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
+				priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+			} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+				uhc_stm32_xfer_end(dev, 0);
+			} else {
+				// TODO: not reachable
+				__ASSERT_NO_MSG(0);
+			}
+		}
+	} else if (urb_state != URB_IDLE) {
+		priv->ongoing_xfer_err_cpt++;
+		if (priv->ongoing_xfer_err_cpt >= UHC_STM32_MAX_ERR) {
+			uhc_stm32_xfer_end(dev, 1); // TODO: proper err value
+		}
+		priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_SETUP;
+	}
+
+	if (priv->ongoing_xfer != NULL && urb_state != URB_IDLE) {
+		uhc_stm32_schedule_xfer(dev);
+	}
 }
 
 void uhc_stm32_thread(const struct device *dev)
@@ -994,7 +1049,7 @@ void uhc_stm32_thread(const struct device *dev)
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_SOF)) {
-			HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
+			/*HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
 			HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
 			if (urb_state != 0 || hc_state != 0) {
 				LOG_DBG("urb_state = %d, hc_state = %d", urb_state, hc_state);
@@ -1014,7 +1069,7 @@ void uhc_stm32_thread(const struct device *dev)
 						LOG_DBG("AARRGGG");
 					}
 				}
-			}
+			}*/
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_NEW_XFER)) {
@@ -1025,6 +1080,11 @@ void uhc_stm32_thread(const struct device *dev)
 				// TODO
 				LOG_DBG("AARRGGG");
 			}
+		}
+
+		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
+			LOG_DBG("URB update");
+			uhc_stm32_xfer_update(dev);
 		}
 	}
 }
