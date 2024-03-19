@@ -158,6 +158,8 @@ static void uhc_stm32_irq(const struct device *dev)
 
 	HAL_HCD_IRQHandler((HCD_HandleTypeDef *)&priv->hcd);
 
+	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
+
 	/* TODO: check WKUPINT to trigger UHC_EVT_RWUP */
 }
 
@@ -764,13 +766,16 @@ static int uhc_stm32_send_data(const struct device *dev,
 							   const uint8_t ep_type,
 							   const uint8_t maximum_packet_size)
 {
-	return uhc_stm32_submit_request(dev,
-		chan_num,
-		0,
-		ep_type,
-		1,
-		buf->data,
-		MIN(buf->len, maximum_packet_size));
+	size_t tx_size = MIN(buf->len, maximum_packet_size);
+
+	int err = uhc_stm32_submit_request(dev, chan_num, 0, ep_type, 1, buf->data, tx_size);
+	if (err) {
+		return err;
+	}
+
+	net_buf_pull(buf, tx_size);
+
+	return 0;
 }
 
 static int uhc_stm32_receive_data(const struct device *dev,
@@ -779,13 +784,20 @@ static int uhc_stm32_receive_data(const struct device *dev,
 								  const uint8_t ep_type,
 								  const uint8_t maximum_packet_size)
 {
-	return uhc_stm32_submit_request(dev,
-		chan_num,
-		1,
-		ep_type,
-		1,
-		net_buf_tail(buf),
-		MIN(net_buf_tailroom(buf), maximum_packet_size));
+	size_t rx_size = MIN(net_buf_tailroom(buf), maximum_packet_size);
+	if (rx_size == 0) {
+		return -ENOMEM;
+	}
+
+	void* buffer_tail = net_buf_add(buf, rx_size);
+
+	int err = uhc_stm32_submit_request(dev, chan_num, 1, ep_type, 1, buffer_tail, rx_size);
+	if (err) {
+		net_buf_remove_mem(buf, rx_size);
+		return err;
+	}
+
+	return 0;
 }
 
 static int uhc_stm32_send_control_status(const struct device *dev, const uint8_t chan_num)
@@ -819,7 +831,12 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 				priv->hcd.hc[0].toggle_out ^= 1;
 				LOG_DBG("resetting IN/OUT toggle");
 			}
-		}*/
+			}*/
+			/*uhc_stm32_send_control_setup(dev,
+				priv->control_out_pipe,
+				xfer->setup_pkt,
+				sizeof(xfer->setup_pkt)
+			);*/
 		return uhc_stm32_send_control_setup(dev,
 			priv->control_out_pipe,
 			xfer->setup_pkt,
@@ -835,7 +852,6 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 			LOG_DBG("Handle DATA stage: send");
 			return uhc_stm32_send_data(dev, priv->control_out_pipe, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
 		}
-		// TODO: net_buf_pull(buf, len) somewere;
 	}
 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
@@ -923,16 +939,17 @@ static void uhc_stm32_xfer_end(const struct device *dev, const int err) {
 	priv->ongoing_xfer_err_cpt = 0;
 }
 
-static void uhc_stm32_xfer_update(const struct device *dev) {
+static int uhc_stm32_xfer_update(const struct device *dev) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	if (priv->ongoing_xfer == NULL) {
-		return;
+		return 0;
 	}
 
 	HCD_URBStateTypeDef urb_state = uhc_stm32_get_ongoing_xfer_urb_state(dev);
 
 	if (urb_state == URB_DONE) {
+		priv->ongoing_xfer_err_cpt = 0;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
 			if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 				if (priv->ongoing_xfer->buf != NULL) {
@@ -941,7 +958,12 @@ static void uhc_stm32_xfer_update(const struct device *dev) {
 					priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
 				}
 			} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
-				priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+				if ((USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep)
+						&& net_buf_tailroom(priv->ongoing_xfer->buf) == 0)
+				    || (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)
+						&& priv->ongoing_xfer->buf->len == 0)) {
+					priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+				}
 			} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 				uhc_stm32_xfer_end(dev, 0);
 			} else {
@@ -958,8 +980,10 @@ static void uhc_stm32_xfer_update(const struct device *dev) {
 	}
 
 	if (priv->ongoing_xfer != NULL && urb_state != URB_IDLE) {
-		uhc_stm32_schedule_xfer(dev);
+		return uhc_stm32_schedule_xfer(dev);
 	}
+
+	return 0;
 }
 
 void uhc_stm32_thread(const struct device *dev)
@@ -1028,12 +1052,12 @@ void uhc_stm32_thread(const struct device *dev)
 			} else if (current_speed == SPEED_HIGH) {
 				pipe_speed = HCD_DEVICE_SPEED_HIGH;
 			}
-			err = uhc_stm32_open_pipe(dev, &(priv->control_out_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 40);
+			err = uhc_stm32_open_pipe(dev, &(priv->control_out_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 8);
 			if (err) {
 				LOG_ERR("Failed to open control pipe out channel");
 				__ASSERT_NO_MSG(0);
 			}
-			err = uhc_stm32_open_pipe(dev, &(priv->control_in_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 40);
+			err = uhc_stm32_open_pipe(dev, &(priv->control_in_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 8);
 			if (err) {
 				LOG_ERR("Failed to open control pipe in channel");
 				__ASSERT_NO_MSG(0);
@@ -1078,13 +1102,24 @@ void uhc_stm32_thread(const struct device *dev)
 			int err = uhc_stm32_schedule_xfer(dev);
 			if (err) {
 				// TODO
-				LOG_DBG("AARRGGG");
+				LOG_DBG("AARRGGG 1");
+			}
+			while(priv->ongoing_xfer != NULL) {
+				err = uhc_stm32_xfer_update(dev);
+				if (err) {
+					// TODO
+					LOG_DBG("AARRGGG 2");
+				}
 			}
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
-			LOG_DBG("URB update");
-			uhc_stm32_xfer_update(dev);
+			//LOG_DBG("URB update");
+			int err = uhc_stm32_xfer_update(dev);
+			if (err) {
+				// TODO
+				LOG_DBG("AARRGGG 3");
+			}
 		}
 	}
 }
