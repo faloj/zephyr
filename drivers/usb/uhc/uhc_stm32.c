@@ -159,6 +159,21 @@ static void uhc_stm32_irq(const struct device *dev)
 
 	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 
+	// TODO: change this
+	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+
+	size_t i;
+	for(i = 0; i < nb_max_pipe; i++) {
+		if (priv->busy_pipe[i] == true) {
+			HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), i);
+			if (urb_state != URB_IDLE) {
+				//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
+				//LOG_DBG("paf !");
+				break;
+			}
+		}
+	}
+
 	/* TODO: check WKUPINT to trigger UHC_EVT_RWUP */
 }
 
@@ -507,8 +522,9 @@ static int uhc_stm32_close_pipe(const struct device *dev, uint8_t pipe_id)
 	return 0;
 }
 
-static inline int uhc_stm32_get_pipe_id_from_ep(const struct device *dev,
+static inline int uhc_stm32_retreive_pipe_id(const struct device *dev,
 												const uint8_t ep,
+												const uint8_t addr,
 												uint8_t * const pipe_id)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -521,7 +537,8 @@ static inline int uhc_stm32_get_pipe_id_from_ep(const struct device *dev,
 	size_t i;
 	for(i = 0; i < nb_max_pipe; i++) {
 		if (priv->busy_pipe[i] == true) {
-			if (priv->hcd.hc[i].ep_num == USB_EP_GET_IDX(ep)) {
+			if ((priv->hcd.hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
+				(priv->hcd.hc[i].dev_addr == addr)) {
 				*pipe_id = i;
 				found = true;
 				break;
@@ -842,7 +859,7 @@ static int uhc_stm32_receive_control_status(const struct device *dev, const uint
 static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer *const xfer)
 {
 	uint8_t pipe_id = 0;
-	int err = uhc_stm32_get_pipe_id_from_ep(dev, xfer->ep, &pipe_id);
+	int err = uhc_stm32_retreive_pipe_id(dev, xfer->ep, xfer->addr, &pipe_id);
 	if (err) {
 		return err;
 	}
@@ -911,7 +928,11 @@ static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct dev
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	uint8_t pipe_id = 0;
-	int err = uhc_stm32_get_pipe_id_from_ep(dev, priv->ongoing_xfer->ep, &pipe_id);
+	int err = uhc_stm32_retreive_pipe_id(dev,
+		priv->ongoing_xfer->ep,
+		priv->ongoing_xfer->addr,
+		&pipe_id
+	);
 	if (err) {
 		LOG_ERR("Pipe ID not found for ongoing XFER");
 		__ASSERT_NO_MSG(0);
@@ -923,6 +944,8 @@ static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct dev
 static void uhc_stm32_xfer_end(const struct device *dev, const int err) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
+	LOG_DBG("end with err = %d", err);
+
 	uhc_xfer_return(dev, priv->ongoing_xfer, err);
 	priv->ongoing_xfer = NULL;
 	priv->ongoing_xfer_err_cpt = 0;
@@ -932,6 +955,7 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	if (priv->ongoing_xfer == NULL) {
+		LOG_DBG("Nothing");
 		return 0;
 	}
 
@@ -956,7 +980,6 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 			} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 				uhc_stm32_xfer_end(dev, 0);
 			} else {
-				// TODO: not reachable
 				__ASSERT_NO_MSG(0);
 			}
 		}
@@ -966,9 +989,13 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 			uhc_stm32_xfer_end(dev, 1); // TODO: proper err value
 		}
 		priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_SETUP;
+	} else { // urb_state == URB_IDLE
+		LOG_DBG("NOPE!");
+		/* Nothing to do */
+		return 0;
 	}
 
-	if (priv->ongoing_xfer != NULL && urb_state != URB_IDLE) {
+	if (priv->ongoing_xfer != NULL) {
 		return uhc_stm32_schedule_xfer(dev);
 	}
 
@@ -1089,6 +1116,7 @@ void uhc_stm32_thread(const struct device *dev)
 				LOG_DBG("AARRGGG 1, %d", err);
 			}
 			while(priv->ongoing_xfer != NULL) {
+				LOG_DBG("while");
 				err = uhc_stm32_xfer_update(dev);
 				if (err) {
 					// TODO
@@ -1098,7 +1126,7 @@ void uhc_stm32_thread(const struct device *dev)
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
-			//LOG_DBG("URB update");
+			LOG_DBG("URB update");
 			int err = uhc_stm32_xfer_update(dev);
 			if (err) {
 				// TODO
