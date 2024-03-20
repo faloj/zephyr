@@ -84,6 +84,7 @@ struct uhc_stm32_data {
 	HCD_HandleTypeDef hcd;
 	struct k_event event_set;
 	struct uhc_transfer *ongoing_xfer;
+	struct net_buf_simple_state ongoing_xfer_buf_save;
 	size_t ongoing_xfer_err_cpt;
 	bool busy_pipe[NB_MAX_PIPE];
 	uint8_t control_pipe;
@@ -566,7 +567,7 @@ static inline void uhc_stm32_init_pipes(const struct device *dev)
 	}
 }
 
-static inline void uhc_stm32_deinit_pipes(const struct device *dev)
+static inline void uhc_stm32_close_all_pipes(const struct device *dev)
 {
 	// TODO: change this
 	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
@@ -575,6 +576,11 @@ static inline void uhc_stm32_deinit_pipes(const struct device *dev)
 	for(i = 0; i < nb_max_pipe; i++) {
 		uhc_stm32_close_pipe(dev, i);
 	}
+}
+
+static inline void uhc_stm32_deinit_pipes(const struct device *dev)
+{
+	return uhc_stm32_close_all_pipes(dev);
 }
 
 static int uhc_stm32_enable(const struct device *dev)
@@ -861,18 +867,23 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	uint8_t pipe_id = 0;
 	int err = uhc_stm32_retreive_pipe_id(dev, xfer->ep, xfer->addr, &pipe_id);
 	if (err) {
+		// No opened pipe found for this endpoint at this device address
 		return err;
 	}
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 		LOG_DBG("Handle SETUP stage");
-		return uhc_stm32_send_control_setup(dev, pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt));
+		int err = uhc_stm32_send_control_setup(dev, pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt));
+		LOG_DBG("SETUP stage DONE ! %d", err);
+		return err;
 	}
 
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOG_DBG("Handle DATA stage: receive");
-			return uhc_stm32_receive_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
+			int err = uhc_stm32_receive_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
+			LOG_DBG("rx stage err = %d", err);
+			return err;
 		} else {
 			LOG_DBG("Handle DATA stage: send");
 			return uhc_stm32_send_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
@@ -882,7 +893,9 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOG_DBG("Handle STATUS stage: send");
-			return uhc_stm32_send_control_status(dev, pipe_id);
+			int err = uhc_stm32_send_control_status(dev, pipe_id);
+			LOG_DBG("status stage err = %d", err);
+			return err;
 		} else {
 			LOG_DBG("Handle STATUS stage: receive");
 			return uhc_stm32_receive_control_status(dev, pipe_id);
@@ -913,6 +926,8 @@ static int uhc_stm32_schedule_xfer(const struct device *dev)
 			return 0;
 		}
 		priv->ongoing_xfer_err_cpt = 0;
+		// TODO: see if it is a valid way of doing things
+		net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 	}
 
 	/* TODO: support all sort of transfers */
@@ -958,10 +973,13 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 		LOG_DBG("Nothing");
 		return 0;
 	}
+	uint8_t a = HAL_HCD_HC_GetState(&(priv->hcd), 0);
+	LOG_DBG("chan state = %d", a);
 
 	HCD_URBStateTypeDef urb_state = uhc_stm32_get_ongoing_xfer_urb_state(dev);
 
 	if (urb_state == URB_DONE) {
+		LOG_DBG("DONE!");
 		priv->ongoing_xfer_err_cpt = 0;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
 			if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
@@ -984,18 +1002,28 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 			}
 		}
 	} else if (urb_state != URB_IDLE) {
+		LOG_DBG("ERR!");
 		priv->ongoing_xfer_err_cpt++;
 		if (priv->ongoing_xfer_err_cpt >= UHC_STM32_MAX_ERR) {
 			uhc_stm32_xfer_end(dev, 1); // TODO: proper err value
+			return 0;
 		}
 		priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_SETUP;
+		// restore net buf to it's pristine state
+		net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+		// must retry
+		//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 	} else { // urb_state == URB_IDLE
 		LOG_DBG("NOPE!");
+		// must retry later
+		k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 		/* Nothing to do */
 		return 0;
 	}
 
 	if (priv->ongoing_xfer != NULL) {
+		uint8_t a = HAL_HCD_HC_GetState(&(priv->hcd), 0);
+		LOG_DBG("chan state = %d", a);
 		return uhc_stm32_schedule_xfer(dev);
 	}
 
@@ -1078,6 +1106,8 @@ void uhc_stm32_thread(const struct device *dev)
 		if (events & EVENT_BIT(UHC_STM32_DEVICE_DISCONNECTED)) {
 			/* Clear stuff if high-speed negociation was ongoing */
 			hs_negociation_reset_ongoing = false;
+
+			uhc_stm32_close_all_pipes(dev);
 
 			/* Let higher level code know a reset occurred */
 			uhc_submit_event(dev, UHC_EVT_DEV_REMOVED, 0);
