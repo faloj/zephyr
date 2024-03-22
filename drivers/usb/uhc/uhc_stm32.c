@@ -23,6 +23,14 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
+//#define LOCAL_LOG_DBG(msg, ...) printk("%d: uhc_stm32: %s: " msg "\n", k_uptime_get_32(), __FUNCTION__ __VA_OPT__(,) __VA_ARGS__)
+
+//#define LOCAL_LOG_DBG(msg, ...) LOG_PRINTK(msg __VA_OPT__(,) __VA_ARGS__)
+
+//#define LOCAL_LOG_DBG(msg, ...)
+
+#define LOCAL_LOG_DBG(msg, ...) LOG_DBG(msg __VA_OPT__(,) __VA_ARGS__)
+
 /* TODO: Some STM32 seems to have multiple USB peripherals with different compat.
  * Must change this to support them.
  */
@@ -158,23 +166,6 @@ static void uhc_stm32_irq(const struct device *dev)
 
 	HAL_HCD_IRQHandler((HCD_HandleTypeDef *)&priv->hcd);
 
-	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
-
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
-
-	size_t i;
-	for(i = 0; i < nb_max_pipe; i++) {
-		if (priv->busy_pipe[i] == true) {
-			HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), i);
-			if (urb_state != URB_IDLE) {
-				//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
-				//LOG_DBG("paf !");
-				break;
-			}
-		}
-	}
-
 	/* TODO: check WKUPINT to trigger UHC_EVT_RWUP */
 }
 
@@ -184,7 +175,7 @@ void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	/* Let the driver thread know a device is connected */
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_SOF));
+	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_SOF));
 }
 
 void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
@@ -225,7 +216,6 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	LOG_DBG("URB callback chnum = %d, urb_state = %d", chnum, urb_state);
 	/* const struct device *dev = (const struct device*) hhcd->pData; */
 
 	/* Let the driver thread know something have changed */
@@ -422,6 +412,15 @@ static int uhc_stm32_init(const struct device *dev)
 		LOG_ERR("Error enabling clock(s)");
 		return -EIO;
 	}
+
+#if defined(CONFIG_SOC_SERIES_STM32H7X)
+	LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
+#if DT_NODE_HAS_COMPAT(DT_INST_PHY(0), DT_PHY_COMPAT_ULPI)
+	LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
+#else
+	LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
+#endif
+#endif
 
 	priv_hcd_prepare(dev);
 
@@ -836,7 +835,7 @@ static int uhc_stm32_receive_data(const struct device *dev,
 								  const uint8_t maximum_packet_size)
 {
 	size_t rx_size = MIN(net_buf_tailroom(buf), maximum_packet_size);
-	LOG_DBG("rx_size = %d", rx_size);
+	LOCAL_LOG_DBG("rx_size = %d", rx_size);
 	if (rx_size == 0) {
 		return -ENOMEM;
 	}
@@ -872,32 +871,32 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	}
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		LOG_DBG("Handle SETUP stage");
+		LOCAL_LOG_DBG("Handle SETUP stage");
 		int err = uhc_stm32_send_control_setup(dev, pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt));
-		LOG_DBG("SETUP stage DONE ! %d", err);
+		LOCAL_LOG_DBG("SETUP stage DONE ! %d", err);
 		return err;
 	}
 
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOG_DBG("Handle DATA stage: receive");
+			LOCAL_LOG_DBG("Handle DATA stage: receive");
 			int err = uhc_stm32_receive_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
-			LOG_DBG("rx stage err = %d", err);
+			LOCAL_LOG_DBG("rx stage err = %d", err);
 			return err;
 		} else {
-			LOG_DBG("Handle DATA stage: send");
+			LOCAL_LOG_DBG("Handle DATA stage: send");
 			return uhc_stm32_send_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
 		}
 	}
 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOG_DBG("Handle STATUS stage: send");
+			LOCAL_LOG_DBG("Handle STATUS stage: send");
 			int err = uhc_stm32_send_control_status(dev, pipe_id);
-			LOG_DBG("status stage err = %d", err);
+			LOCAL_LOG_DBG("status stage err = %d", err);
 			return err;
 		} else {
-			LOG_DBG("Handle STATUS stage: receive");
+			LOCAL_LOG_DBG("Handle STATUS stage: receive");
 			return uhc_stm32_receive_control_status(dev, pipe_id);
 		}
 	}
@@ -917,7 +916,7 @@ static int uhc_stm32_schedule_xfer(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	//LOG_DBG("schedule");
+	//LOCAL_LOG_DBG("schedule");
 
 	if (priv->ongoing_xfer == NULL) {
 		priv->ongoing_xfer = uhc_xfer_get_next(dev);
@@ -959,7 +958,7 @@ static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct dev
 static void uhc_stm32_xfer_end(const struct device *dev, const int err) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	LOG_DBG("end with err = %d", err);
+	LOCAL_LOG_DBG("end with err = %d", err);
 
 	uhc_xfer_return(dev, priv->ongoing_xfer, err);
 	priv->ongoing_xfer = NULL;
@@ -970,16 +969,14 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	if (priv->ongoing_xfer == NULL) {
-		LOG_DBG("Nothing");
+		LOCAL_LOG_DBG("Nothing");
 		return 0;
 	}
-	uint8_t a = HAL_HCD_HC_GetState(&(priv->hcd), 0);
-	LOG_DBG("chan state = %d", a);
 
 	HCD_URBStateTypeDef urb_state = uhc_stm32_get_ongoing_xfer_urb_state(dev);
 
 	if (urb_state == URB_DONE) {
-		LOG_DBG("DONE!");
+		LOCAL_LOG_DBG("DONE!");
 		priv->ongoing_xfer_err_cpt = 0;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
 			if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
@@ -1002,7 +999,7 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 			}
 		}
 	} else if (urb_state != URB_IDLE) {
-		LOG_DBG("ERR!");
+		LOCAL_LOG_DBG("ERR!");
 		priv->ongoing_xfer_err_cpt++;
 		if (priv->ongoing_xfer_err_cpt >= UHC_STM32_MAX_ERR) {
 			uhc_stm32_xfer_end(dev, 1); // TODO: proper err value
@@ -1014,7 +1011,7 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 		// must retry
 		//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 	} else { // urb_state == URB_IDLE
-		LOG_DBG("NOPE!");
+		LOCAL_LOG_DBG("NOPE!");
 		// must retry later
 		k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
 		/* Nothing to do */
@@ -1022,8 +1019,6 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 	}
 
 	if (priv->ongoing_xfer != NULL) {
-		uint8_t a = HAL_HCD_HC_GetState(&(priv->hcd), 0);
-		LOG_DBG("chan state = %d", a);
 		return uhc_stm32_schedule_xfer(dev);
 	}
 
@@ -1039,11 +1034,13 @@ void uhc_stm32_thread(const struct device *dev)
 	bool hs_negociation_reset_ongoing = false;
 
 	while (true) {
+		LOCAL_LOG_DBG("Wait for event");
 		uint32_t events = k_event_wait(&priv->event_set, 0xFFFF, false, K_FOREVER);
 
 		k_event_clear(&priv->event_set, events);
 
 		if (events & EVENT_BIT(UHC_STM32_DEVICE_CONNECTED)) {
+			LOCAL_LOG_DBG("Event : Connection");
 			/* ST USB Host code wait 200ms after a connection and before issuing a
 			 * reset so do the same here
 			 */
@@ -1058,6 +1055,7 @@ void uhc_stm32_thread(const struct device *dev)
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_BUS_RESETED)) {
+			LOCAL_LOG_DBG("Event : Reset");
 			if (hs_negociation_reset_ongoing) {
 				hs_negociation_reset_ongoing = false;
 			} else {
@@ -1072,15 +1070,15 @@ void uhc_stm32_thread(const struct device *dev)
 
 			switch (current_speed) {
 				case SPEED_LOW: {
-					LOG_DBG("LS");
+					LOCAL_LOG_DBG("LS");
 					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_LS, 0);
 				} break;
 				case SPEED_FULL: {
-					LOG_DBG("FS");
+					LOCAL_LOG_DBG("FS");
 					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_FS, 0);
 				} break;
 				case SPEED_HIGH: {
-					LOG_DBG("HS");
+					LOCAL_LOG_DBG("HS");
 					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_HS, 0);
 				} break;
 			}
@@ -1104,6 +1102,7 @@ void uhc_stm32_thread(const struct device *dev)
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_DEVICE_DISCONNECTED)) {
+			LOCAL_LOG_DBG("Event : Disconnection");
 			/* Clear stuff if high-speed negociation was ongoing */
 			hs_negociation_reset_ongoing = false;
 
@@ -1114,16 +1113,17 @@ void uhc_stm32_thread(const struct device *dev)
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_SOF)) {
+			LOCAL_LOG_DBG("Event : SOF");
 			/*HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
 			HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
 			if (urb_state != 0 || hc_state != 0) {
-				LOG_DBG("urb_state = %d, hc_state = %d", urb_state, hc_state);
+				LOCAL_LOG_DBG("urb_state = %d, hc_state = %d", urb_state, hc_state);
 			}
 			if (HAL_HCD_HC_GetURBState(&(priv->hcd), 0) == URB_DONE &&
 			    //HAL_HCD_HC_GetState(&(priv->hcd), 0) == HC_HALTED &&
 			    priv->ongoing_xfer != NULL) {
 				priv->ongoing_xfer->stage++;
-				LOG_DBG("Next stage !");
+				LOCAL_LOG_DBG("Next stage !");
 				if (priv->ongoing_xfer->stage > UHC_CONTROL_STAGE_STATUS) {
 					uhc_xfer_return(dev, priv->ongoing_xfer, 0);
 					priv->ongoing_xfer = NULL;
@@ -1131,37 +1131,45 @@ void uhc_stm32_thread(const struct device *dev)
 					int err = uhc_stm32_schedule_xfer(dev);
 					if (err) {
 						// TODO
-						LOG_DBG("AARRGGG");
+						LOCAL_LOG_DBG("AARRGGG");
 					}
 				}
 			}*/
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_NEW_XFER)) {
+			LOCAL_LOG_DBG("Event : New XFER");
 			// TODO: this is just for tests must handle it properly
-			LOG_DBG("will send");
+			LOCAL_LOG_DBG("will send");
 			int err = uhc_stm32_schedule_xfer(dev);
 			if (err) {
 				// TODO
-				LOG_DBG("AARRGGG 1, %d", err);
+				LOCAL_LOG_DBG("AARRGGG 1, %d", err);
 			}
-			while(priv->ongoing_xfer != NULL) {
-				LOG_DBG("while");
+			/*while(testeeeeeee);
+			testeeeeeee = true;*/
+			/*while(priv->ongoing_xfer != NULL) {
+				LOCAL_LOG_DBG("while");
 				err = uhc_stm32_xfer_update(dev);
 				if (err) {
 					// TODO
-					LOG_DBG("AARRGGG 2, %d", err);
+					LOCAL_LOG_DBG("AARRGGG 2, %d", err);
 				}
-			}
+			}*/
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
-			LOG_DBG("URB update");
+			LOCAL_LOG_DBG("Event : Update");
+			LOCAL_LOG_DBG("URB update");
 			int err = uhc_stm32_xfer_update(dev);
 			if (err) {
 				// TODO
-				LOG_DBG("AARRGGG 3, %d", err);
+				LOCAL_LOG_DBG("AARRGGG 3, %d", err);
 			}
+			/*if (priv->ongoing_xfer != NULL) {
+				while(testeeeeeee);
+				testeeeeeee = true;
+			}*/
 		}
 	}
 }
@@ -1244,8 +1252,8 @@ static int uhc_stm32_driver_init0(const struct device *dev)
 			0, K_NO_WAIT);
 	k_thread_name_set(&drv_stack_data, "uhc_stm32");
 
-	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority), uhc_stm32_irq, DEVICE_DT_INST_GET(0),
-		    0);
+	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority), uhc_stm32_irq, DEVICE_DT_INST_GET(0), 0);
+
 	return 0;
 }
 
