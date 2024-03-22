@@ -51,10 +51,8 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 #define SETUP_PACKET_SIZE (8U)
 
-#define DEFAULT_CTRL_PIPE_OUT (0U)
-#define DEFAULT_CTRL_PIPE_IN  (1U)
-#define DEFAULT_BULK_PIPE_IN  (2U)
-#define DEFAULT_BULK_PIPE_OUT (3U)
+#define DEFAULT_EP0_MPS (64U)
+#define DEFAULT_ADDR    ( 0U)
 
 #define NB_MAX_PIPE (16U)
 
@@ -101,6 +99,7 @@ struct uhc_stm32_data {
 struct uhc_stm32_config {
 	uint32_t irq;
 	enum phy_type phy;
+	size_t num_host_channels;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	enum dt_speed max_speed;
 	const struct pinctrl_dev_config *pcfg;
@@ -229,7 +228,7 @@ static inline void priv_hcd_prepare(const struct device *dev)
 
 	memset(&priv->hcd, 0, sizeof(priv->hcd));
 
-	priv->hcd.Init.Host_channels = DT_INST_PROP(0, num_host_channels);
+	priv->hcd.Init.Host_channels = config->num_host_channels;
 	priv->hcd.Init.dma_enable = 0;
 	priv->hcd.Init.battery_charging_enable = DISABLE;
 	priv->hcd.Init.use_external_vbus = DISABLE;
@@ -465,14 +464,12 @@ static int uhc_stm32_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8
 							   uint8_t dev_addr, uint8_t speed, uint8_t ep_type, uint16_t mps)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+	const struct uhc_stm32_config *config = dev->config;
 
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < nb_max_pipe; i++) {
+	for(i = 0; i < config->num_host_channels; i++) {
 		if (priv->busy_pipe[i] == false) {
 			*pipe_id = i;
 			found = true;
@@ -500,11 +497,9 @@ static int uhc_stm32_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8
 static int uhc_stm32_close_pipe(const struct device *dev, uint8_t pipe_id)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	const struct uhc_stm32_config *config = dev->config;
 
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
-
-	if (pipe_id > nb_max_pipe) {
+	if (pipe_id > config->num_host_channels) {
 		return -EINVAL;
 	}
 
@@ -528,14 +523,12 @@ static inline int uhc_stm32_retreive_pipe_id(const struct device *dev,
 												uint8_t * const pipe_id)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+	const struct uhc_stm32_config *config = dev->config;
 
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < nb_max_pipe; i++) {
+	for(i = 0; i < config->num_host_channels; i++) {
 		if (priv->busy_pipe[i] == true) {
 			if ((priv->hcd.hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
 				(priv->hcd.hc[i].dev_addr == addr)) {
@@ -556,23 +549,20 @@ static inline int uhc_stm32_retreive_pipe_id(const struct device *dev,
 static inline void uhc_stm32_init_pipes(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+	const struct uhc_stm32_config *config = dev->config;
 
 	size_t i;
-	for(i = 0; i < nb_max_pipe; i++) {
+	for(i = 0; i < config->num_host_channels; i++) {
 		priv->busy_pipe[i] = false;
 	}
 }
 
 static inline void uhc_stm32_close_all_pipes(const struct device *dev)
 {
-	// TODO: change this
-	size_t nb_max_pipe = DT_INST_PROP(0, num_host_channels);
+	const struct uhc_stm32_config *config = dev->config;
 
 	size_t i;
-	for(i = 0; i < nb_max_pipe; i++) {
+	for(i = 0; i < config->num_host_channels; i++) {
 		uhc_stm32_close_pipe(dev, i);
 	}
 }
@@ -909,7 +899,6 @@ static int uhc_stm32_xfer_bulk(const struct device *dev, struct uhc_transfer *co
 	//struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	return 0;
-
 }
 
 static int uhc_stm32_schedule_xfer(const struct device *dev)
@@ -1094,7 +1083,13 @@ void uhc_stm32_thread(const struct device *dev)
 			} else if (current_speed == SPEED_HIGH) {
 				pipe_speed = HCD_DEVICE_SPEED_HIGH;
 			}
-			err = uhc_stm32_open_pipe(dev, &(priv->control_pipe), 0, 0, pipe_speed, EP_TYPE_CTRL, 64);
+			err = uhc_stm32_open_pipe(dev,
+				&(priv->control_pipe),
+				0, DEFAULT_ADDR,
+				pipe_speed,
+				EP_TYPE_CTRL,
+				DEFAULT_EP0_MPS
+			);
 			if (err) {
 				LOG_ERR("Failed to open control pipe out channel");
 				__ASSERT_NO_MSG(0);
@@ -1114,62 +1109,25 @@ void uhc_stm32_thread(const struct device *dev)
 
 		if (events & EVENT_BIT(UHC_STM32_SOF)) {
 			LOCAL_LOG_DBG("Event : SOF");
-			/*HCD_URBStateTypeDef urb_state = HAL_HCD_HC_GetURBState(&(priv->hcd), 0);
-			HCD_HCStateTypeDef hc_state = HAL_HCD_HC_GetState(&(priv->hcd), 0);
-			if (urb_state != 0 || hc_state != 0) {
-				LOCAL_LOG_DBG("urb_state = %d, hc_state = %d", urb_state, hc_state);
-			}
-			if (HAL_HCD_HC_GetURBState(&(priv->hcd), 0) == URB_DONE &&
-			    //HAL_HCD_HC_GetState(&(priv->hcd), 0) == HC_HALTED &&
-			    priv->ongoing_xfer != NULL) {
-				priv->ongoing_xfer->stage++;
-				LOCAL_LOG_DBG("Next stage !");
-				if (priv->ongoing_xfer->stage > UHC_CONTROL_STAGE_STATUS) {
-					uhc_xfer_return(dev, priv->ongoing_xfer, 0);
-					priv->ongoing_xfer = NULL;
-				} else {
-					int err = uhc_stm32_schedule_xfer(dev);
-					if (err) {
-						// TODO
-						LOCAL_LOG_DBG("AARRGGG");
-					}
-				}
-			}*/
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_NEW_XFER)) {
 			LOCAL_LOG_DBG("Event : New XFER");
 			// TODO: this is just for tests must handle it properly
-			LOCAL_LOG_DBG("will send");
 			int err = uhc_stm32_schedule_xfer(dev);
 			if (err) {
 				// TODO
 				LOCAL_LOG_DBG("AARRGGG 1, %d", err);
 			}
-			/*while(testeeeeeee);
-			testeeeeeee = true;*/
-			/*while(priv->ongoing_xfer != NULL) {
-				LOCAL_LOG_DBG("while");
-				err = uhc_stm32_xfer_update(dev);
-				if (err) {
-					// TODO
-					LOCAL_LOG_DBG("AARRGGG 2, %d", err);
-				}
-			}*/
 		}
 
 		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
 			LOCAL_LOG_DBG("Event : Update");
-			LOCAL_LOG_DBG("URB update");
 			int err = uhc_stm32_xfer_update(dev);
 			if (err) {
 				// TODO
 				LOCAL_LOG_DBG("AARRGGG 3, %d", err);
 			}
-			/*if (priv->ongoing_xfer != NULL) {
-				while(testeeeeeee);
-				testeeeeeee = true;
-			}*/
 		}
 	}
 }
@@ -1202,6 +1160,15 @@ static const struct uhc_stm32_config uhc0_config = {
 #error Illegal number of elements defined in the "clocks" property in device tree
 #else
 	.clocks = STM32_DT_INST_CLOCKS(0),
+#endif
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32_otghs) || DT_HAS_COMPAT_STATUS_OKAY(st_stm32_otgfs)
+#if DT_INST_PROP(0, num_host_channels) > NB_MAX_PIPE
+#error Illegal number of host channels
+#else
+	.num_host_channels = DT_INST_PROP(0, num_host_channels),
+#endif
+#else
+#error Not implemeted
 #endif
 #if DT_NODE_HAS_COMPAT(DT_INST_PHY(0), DT_PHY_COMPAT_EMBEDDED_FS)
 	.max_speed = MIN(DT_INST_MAX_SPEED(0), DT_ENUM_MAX_SPEED_FULL),
@@ -1239,11 +1206,6 @@ static int uhc_stm32_driver_init0(const struct device *dev)
 		data->caps.hs = 1;
 	} else {
 		data->caps.hs = 0;
-	}
-
-	if (DT_INST_PROP(0, num_host_channels) > NB_MAX_PIPE) {
-		__ASSERT_NO_MSG(0);
-		return -EINVAL;
 	}
 
 	k_event_init(&priv->event_set);
