@@ -44,6 +44,7 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 #define DT_CLOCKS_PROP_MAX_LEN (2)
 
+#define DT_PHY(node_id)           DT_PHANDLE(node_id, phys)
 #define DT_INST_PHY(inst)         DT_INST_PHANDLE(inst, phys)
 #define DT_PHY_COMPAT_EMBEDDED_FS usb_nop_xceiv
 #define DT_PHY_COMPAT_EMBEDDED_HS st_stm32_usbphyc
@@ -70,6 +71,9 @@ enum dt_speed {
 	DT_ENUM_MAX_SPEED_SUPER = 3,
 };
 
+
+#define DT_MAX_SPEED(node_id, phy_max_speed) MIN(DT_ENUM_IDX_OR(node_id, maximum_speed, phy_max_speed), phy_max_speed)
+#define DT_MAX_SPEED_OR(node_id, default_speed) DT_ENUM_IDX_OR(node_id, maximum_speed, default_speed)
 #define DT_INST_MAX_SPEED(inst) DT_INST_ENUM_IDX_OR(inst, maximum_speed, DT_ENUM_MAX_SPEED_HIGH)
 
 enum speed {
@@ -1221,3 +1225,122 @@ static int uhc_stm32_driver_init0(const struct device *dev)
 
 DEVICE_DT_INST_DEFINE(0, uhc_stm32_driver_init0, NULL, &uhc0_data, &uhc0_config, POST_KERNEL,
 		      CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &uhc_stm32_api);
+
+/*
+#define STM32_OTGHS_INIT(node_id)                                                                  \
+                                                                                                   \
+PINCTRL_DT_DEFINE(node_id);                                                                        \
+								                                                                   \
+BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                                     \
+	"Invalid number of element in \"clock\" property in device tree");                             \
+BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                                   \
+	"Invalid number of host channels");                                                            \
+                                                                                                   \
+static const struct uhc_stm32_config uhc_config_##node_id = {                                      \
+	.irq = DT_IRQN(node_id),                                                                       \
+	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                                    \
+	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_it, vbus_gpios, {0}),                             \                                                                          \
+	.clocks = STM32_DT_CLOCKS(node_id),                                                            \
+	.num_host_channels = DT_PROP(node_id, num_host_channels),                                      \
+#if DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS)                                 \
+	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                                    \
+	.phy = PHY_EMBEDDED_FS,                                                                        \
+#elif DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI)                                      \
+	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_HIGH),                                    \
+	.phy = PHY_EXTERNAL_ULPI,                                                                      \
+	.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                     \
+#elif DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_HS) &&                            \
+      defined(USB_OTG_HS_EMBEDDED_PHY)                                                             \
+	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_HIGH),                                    \
+	.phy = PHY_EMBEDDED_HS,                                                                        \
+#else                                                                                              \
+#error Unsupported or incompatible USB PHY defined in device tree.                                 \
+#endif                                                                                             \
+};                                                                                                 \
+                                                                                                   \
+static struct uhc_stm32_data uhc_priv_data_##node_id;                                              \
+                                                                                                   \
+static struct uhc_data uhc_data_##node_id = {                                                      \
+	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                                        \
+	.priv = &uhc_priv_data_node_id,                                                                \
+};                                                                                                 \
+                                                                                                   \
+DEVICE_DT_DEFINE(node_id, uhc_stm32_driver_init0, NULL,                                            \
+				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
+				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
+				 &uhc_stm32_api);                                                                  \
+
+DT_FOREACH_STATUS_OKAY(st_stm32_otghs, STM32_OTGHS_INIT)
+
+
+#define STM32_OTGFS_INIT(node_id)                                                 \
+                                                                                  \
+PINCTRL_DT_DEFINE(node_id);                                                       \
+								                                                  \
+BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                    \
+	"Invalid number of element in \"clock\" property in device tree");            \
+BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                  \
+	"Invalid number of host channels");                                           \
+BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
+	"Invalid PHY defined in device tree");                                        \
+                                                                                  \
+static const struct uhc_stm32_config uhc_config_##node_id = {                     \
+	.irq = DT_IRQN(node_id),                                                      \
+	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                   \
+	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_it, vbus_gpios, {0}),            \
+	.clocks = STM32_DT_CLOCKS(node_id),                                           \
+	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
+	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                   \
+	.phy = PHY_EMBEDDED_FS,                                                       \
+};                                                                                \
+                                                                                  \
+static struct uhc_stm32_data uhc_priv_data_##node_id;                             \
+                                                                                  \
+static struct uhc_data uhc_data_##node_id = {                                     \
+	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                       \
+	.priv = &uhc_priv_data_##node_id,                                             \
+};                                                                                                 \
+																								   \
+DEVICE_DT_DEFINE(node_id, uhc_stm32_driver_init0, NULL,                                            \
+				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
+				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
+				 &uhc_stm32_api);                                                                  \
+
+DT_FOREACH_STATUS_OKAY(st_stm32_otgfs, STM32_OTGFS_INIT)
+
+
+#define STM32_USB_INIT(node_id)                                                   \
+                                                                                  \
+PINCTRL_DT_DEFINE(node_id);                                                       \
+								                                                  \
+BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                    \
+	"Invalid number of element in \"clock\" property in device tree");            \
+BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                  \
+	"Invalid number of host channels");                                           \
+BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
+	"Invalid PHY defined in device tree");                                        \
+                                                                                  \
+static const struct uhc_stm32_config uhc_config_##node_id = {                     \
+	.irq = DT_IRQN(node_id),                                                      \
+	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                   \
+	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_it, vbus_gpios, {0}),            \
+	.clocks = STM32_DT_CLOCKS(node_id),                                           \
+	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
+	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                   \
+	.phy = PHY_EMBEDDED_FS,                                                       \
+};                                                                                \
+                                                                                  \
+static struct uhc_stm32_data uhc_priv_data_##node_id;                             \
+                                                                                  \
+static struct uhc_data uhc_data_##node_id = {                                     \
+	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                       \
+	.priv = &uhc_priv_data_##node_id,                                             \
+};                                                                                                 \
+																								   \
+DEVICE_DT_DEFINE(node_id, uhc_stm32_driver_init0, NULL,                                            \
+				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
+				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
+				 &uhc_stm32_api);                                                                  \
+
+DT_FOREACH_STATUS_OKAY(st_stm32_usb, STM32_USB_INIT)
+*/
