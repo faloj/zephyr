@@ -90,6 +90,12 @@ enum phy_type {
 	PHY_EXTERNAL_ULPI,
 };
 
+enum uhc_state {
+	STM32_UHC_STATE_SPEED_ENUM,
+	STM32_UHC_STATE_DISCONNECTED,
+	STM32_UHC_STATE_READY,
+};
+
 struct uhc_stm32_data {
 	HCD_HandleTypeDef hcd;
 	struct k_event event_set;
@@ -98,6 +104,15 @@ struct uhc_stm32_data {
 	size_t ongoing_xfer_err_cpt;
 	bool busy_pipe[NB_MAX_PIPE];
 	uint8_t control_pipe;
+	struct k_work_q work_queue;
+	struct k_work on_connect_work;
+	struct k_work on_disconnect_work;
+	struct k_work on_reset_work;
+	struct k_work on_xfer_update_work;
+	struct k_work on_new_xfer_work;
+	struct k_work_delayable delayed_reset_work;
+	enum uhc_state state;
+	const struct device * dev;
 };
 
 struct uhc_stm32_config {
@@ -131,6 +146,7 @@ static inline enum speed priv_get_current_speed(const struct device *dev)
 
 	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(&(priv->hcd));
 
+// TODO : see how to handle both
 #if defined(USB_DRD_FS)
 	switch (hal_speed) {
 		case USB_DRD_SPEED_LS: {
@@ -174,11 +190,10 @@ static void uhc_stm32_irq(const struct device *dev)
 
 void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
 {
-	const struct device *dev = (const struct device *)hhcd->pData;
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	ARG_UNUSED(hhcd);
 
-	/* Let the driver thread know a device is connected */
-	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_SOF));
+	//const struct device *dev = (const struct device *)hhcd->pData;
+	//struct uhc_stm32_data *priv = uhc_get_private(dev);
 }
 
 void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
@@ -186,8 +201,7 @@ void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* Let the driver thread know a device is connected */
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_DEVICE_CONNECTED));
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_connect_work);
 }
 
 void HAL_HCD_Disconnect_Callback(HCD_HandleTypeDef *hhcd)
@@ -195,8 +209,7 @@ void HAL_HCD_Disconnect_Callback(HCD_HandleTypeDef *hhcd)
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* Let the driver thread know the device has been disconnected */
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_DEVICE_DISCONNECTED));
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_disconnect_work);
 }
 
 void HAL_HCD_PortEnabled_Callback(HCD_HandleTypeDef *hhcd)
@@ -204,13 +217,15 @@ void HAL_HCD_PortEnabled_Callback(HCD_HandleTypeDef *hhcd)
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* Let the driver thread know the reset operation is done */
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_BUS_RESETED));
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_reset_work);
 }
 
 void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 {
-	/* const struct device *dev = (const struct device*) hhcd->pData; */
+	ARG_UNUSED(hhcd);
+
+	//const struct device *dev = (const struct device *)hhcd->pData;
+	//struct uhc_stm32_data *priv = uhc_get_private(dev);
 }
 
 void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
@@ -219,10 +234,7 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* const struct device *dev = (const struct device*) hhcd->pData; */
-
-	/* Let the driver thread know something have changed */
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
 }
 
 static inline void priv_hcd_prepare(const struct device *dev)
@@ -736,7 +748,8 @@ static int uhc_stm32_ep_enqueue(const struct device *dev, struct uhc_transfer *c
 		return err;
 	}
 
-	k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_NEW_XFER));
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_new_xfer_work);
+	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_NEW_XFER));
 
 	return 0;
 }
@@ -866,7 +879,7 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 		LOCAL_LOG_DBG("Handle SETUP stage");
-		int err = uhc_stm32_send_control_setup(dev, pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt));
+		err = uhc_stm32_send_control_setup(dev, pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt));
 		LOCAL_LOG_DBG("SETUP stage DONE ! %d", err);
 		return err;
 	}
@@ -874,7 +887,7 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOCAL_LOG_DBG("Handle DATA stage: receive");
-			int err = uhc_stm32_receive_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
+			err = uhc_stm32_receive_data(dev, pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps);
 			LOCAL_LOG_DBG("rx stage err = %d", err);
 			return err;
 		} else {
@@ -886,7 +899,7 @@ static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOCAL_LOG_DBG("Handle STATUS stage: send");
-			int err = uhc_stm32_send_control_status(dev, pipe_id);
+			err = uhc_stm32_send_control_status(dev, pipe_id);
 			LOCAL_LOG_DBG("status stage err = %d", err);
 			return err;
 		} else {
@@ -1018,121 +1031,127 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 	return 0;
 }
 
-void uhc_stm32_thread(const struct device *dev)
+// TODO : lock when needed
+void priv_on_port_connect(struct k_work *item)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
+    struct uhc_stm32_data *priv = CONTAINER_OF(item, struct uhc_stm32_data, on_connect_work);
 
-	LOG_DBG("STM32 USB Host driver thread started");
+	LOG_DBG("Event : Connection");
 
-	bool hs_negociation_reset_ongoing = false;
+	/* PHY is high speed capable and connected device may also be so we must
+	   schedule a reset to allow determining the real device speed. */
+	int ret = k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_reset_work, K_MSEC(200));
+	if (ret < 0) {
+		// TODO
+		__ASSERT_NO_MSG(0);
+	} else {
+		// TODO
+	}
+	priv->state = STM32_UHC_STATE_SPEED_ENUM;
+}
 
-	while (true) {
-		LOCAL_LOG_DBG("Wait for event");
-		uint32_t events = k_event_wait(&priv->event_set, 0xFFFF, false, K_FOREVER);
+void priv_on_reset(struct k_work *work)
+{
+    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_reset_work);
 
-		k_event_clear(&priv->event_set, events);
+	LOG_DBG("Event : Reset");
 
-		if (events & EVENT_BIT(UHC_STM32_DEVICE_CONNECTED)) {
-			LOCAL_LOG_DBG("Event : Connection");
-			/* ST USB Host code wait 200ms after a connection and before issuing a
-			 * reset so do the same here
-			 */
-			k_msleep(200); /* TODO: check if useful */
+	// TODO: see what happen when this function is called but without any device connected
+	enum speed current_speed = priv_get_current_speed(priv->dev);
 
-			/* Perform a bus reset, this is normally done if device adverted itself
-			 * as full-speed capable to perform high-speed negociation but seems
-			 * required in any case according to RM0468 reference manual
-			 */
-			hs_negociation_reset_ongoing = true;
-			uhc_stm32_bus_reset(dev);
+	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
+		priv->state = STM32_UHC_STATE_READY;
+		if (current_speed == SPEED_LOW) {
+			LOG_DBG("LS");
+			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_LS, 0);
+		} else if (current_speed == SPEED_FULL) {
+			LOG_DBG("FS");
+			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_FS, 0);
+		} else {
+			LOG_DBG("HS");
+			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_HS, 0);
 		}
+	} else {
+		/* Let higher level code know a reset occurred */
+		uhc_submit_event(priv->dev, UHC_EVT_RESETED, 0);
+	}
 
-		if (events & EVENT_BIT(UHC_STM32_BUS_RESETED)) {
-			LOCAL_LOG_DBG("Event : Reset");
-			if (hs_negociation_reset_ongoing) {
-				hs_negociation_reset_ongoing = false;
-			} else {
-				/* Let higher level code know a reset occurred */
-				uhc_submit_event(dev, UHC_EVT_RESETED, 0);
-			}
+	if (priv->state != STM32_UHC_STATE_DISCONNECTED) {
+		int err = 0;
 
-			/* A reset occurred, retrieve negotiated speed to inform higher level
-			 * code
-			 */
-			enum speed current_speed = priv_get_current_speed(dev);
-
-			switch (current_speed) {
-				case SPEED_LOW: {
-					LOCAL_LOG_DBG("LS");
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_LS, 0);
-				} break;
-				case SPEED_FULL: {
-					LOCAL_LOG_DBG("FS");
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_FS, 0);
-				} break;
-				case SPEED_HIGH: {
-					LOCAL_LOG_DBG("HS");
-					uhc_submit_event(dev, UHC_EVT_DEV_CONNECTED_HS, 0);
-				} break;
-			}
-
-			int err = 0;
-
-			// TODO : this open pipe thing is temporary
-			uint8_t pipe_speed = SPEED_LOW;
-			if (current_speed == SPEED_LOW) {
-				pipe_speed = HCD_DEVICE_SPEED_LOW;
-			} else if (current_speed == SPEED_FULL) {
-				pipe_speed = HCD_DEVICE_SPEED_FULL;
-			} else if (current_speed == SPEED_HIGH) {
-				pipe_speed = HCD_DEVICE_SPEED_HIGH;
-			}
-			err = uhc_stm32_open_pipe(dev,
-				&(priv->control_pipe),
-				0, DEFAULT_ADDR,
-				pipe_speed,
-				EP_TYPE_CTRL,
-				DEFAULT_EP0_MPS
-			);
-			if (err) {
-				LOG_ERR("Failed to open control pipe out channel");
-				__ASSERT_NO_MSG(0);
-			}
+		// TODO : this open pipe thing is temporary
+		uint8_t pipe_speed = SPEED_LOW;
+		if (current_speed == SPEED_LOW) {
+			pipe_speed = HCD_DEVICE_SPEED_LOW;
+		} else if (current_speed == SPEED_FULL) {
+			pipe_speed = HCD_DEVICE_SPEED_FULL;
+		} else if (current_speed == SPEED_HIGH) {
+			pipe_speed = HCD_DEVICE_SPEED_HIGH;
 		}
-
-		if (events & EVENT_BIT(UHC_STM32_DEVICE_DISCONNECTED)) {
-			LOCAL_LOG_DBG("Event : Disconnection");
-			/* Clear stuff if high-speed negociation was ongoing */
-			hs_negociation_reset_ongoing = false;
-
-			uhc_stm32_close_all_pipes(dev);
-
-			/* Let higher level code know a reset occurred */
-			uhc_submit_event(dev, UHC_EVT_DEV_REMOVED, 0);
+		err = uhc_stm32_open_pipe(priv->dev,
+			&(priv->control_pipe),
+			0, DEFAULT_ADDR,
+			pipe_speed,
+			EP_TYPE_CTRL,
+			DEFAULT_EP0_MPS
+		);
+		if (err) {
+			LOG_ERR("Failed to open control pipe out channel");
+			__ASSERT_NO_MSG(0);
 		}
+	}
+}
 
-		if (events & EVENT_BIT(UHC_STM32_SOF)) {
-			LOCAL_LOG_DBG("Event : SOF");
-		}
+void priv_on_port_disconnect(struct k_work *work)
+{
+    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_disconnect_work);
 
-		if (events & EVENT_BIT(UHC_STM32_NEW_XFER)) {
-			LOCAL_LOG_DBG("Event : New XFER");
-			// TODO: this is just for tests must handle it properly
-			int err = uhc_stm32_schedule_xfer(dev);
-			if (err) {
-				// TODO
-				LOCAL_LOG_DBG("AARRGGG 1, %d", err);
-			}
-		}
+	LOG_DBG("Event : Disconnection");
 
-		if (events & EVENT_BIT(UHC_STM32_URB_UPDATE)) {
-			LOCAL_LOG_DBG("Event : Update");
-			int err = uhc_stm32_xfer_update(dev);
-			if (err) {
-				// TODO
-				LOCAL_LOG_DBG("AARRGGG 3, %d", err);
-			}
-		}
+	priv->state = STM32_UHC_STATE_DISCONNECTED;
+
+	// TODO : empty workqueue ?
+
+	uhc_stm32_close_all_pipes(priv->dev);
+
+	/* Let higher level code know a disconnection occurred */
+	uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
+}
+
+void priv_on_xfer_update(struct k_work *work)
+{
+    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_xfer_update_work);
+
+	LOG_DBG("Event : Update");
+	int err = uhc_stm32_xfer_update(priv->dev);
+	if (err) {
+		// TODO
+		LOG_DBG("AARRGGG 3, %d", err);
+	}
+}
+
+void priv_on_new_xfer(struct k_work *work)
+{
+    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_new_xfer_work);
+
+	LOG_DBG("Event : New XFER");
+	// TODO: this is just for tests must handle it properly
+	int err = uhc_stm32_schedule_xfer(priv->dev);
+	if (err) {
+		// TODO
+		LOG_DBG("AARRGGG 1, %d", err);
+	}
+}
+
+void priv_delayed_reset(struct k_work * work)
+{
+	struct k_work_delayable *delayable_work = k_work_delayable_from_work(work);
+	struct uhc_stm32_data *priv =
+		CONTAINER_OF(delayable_work, struct uhc_stm32_data, delayed_reset_work);
+
+	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
+		// TODO: this function takes time and will delay other submited work
+		uhc_stm32_bus_reset(priv->dev);
 	}
 }
 
@@ -1200,6 +1219,8 @@ static struct uhc_data uhc0_data = {
 	.priv = &uhc0_priv_data,
 };
 
+K_THREAD_STACK_DEFINE(work_thread_stack, CONFIG_UHC_STM32_DRV_THREAD_STACK_SIZE);
+
 static int uhc_stm32_driver_init0(const struct device *dev)
 {
 	struct uhc_data *data = dev->data;
@@ -1212,11 +1233,20 @@ static int uhc_stm32_driver_init0(const struct device *dev)
 		data->caps.hs = 0;
 	}
 
-	k_event_init(&priv->event_set);
-	k_thread_create(&drv_stack_data, drv_stack, K_THREAD_STACK_SIZEOF(drv_stack),
-			(k_thread_entry_t)uhc_stm32_thread, (void *)dev, NULL, NULL, K_PRIO_COOP(2),
-			0, K_NO_WAIT);
-	k_thread_name_set(&drv_stack_data, "uhc_stm32");
+	priv->dev = dev;
+	priv->state = STM32_UHC_STATE_DISCONNECTED;
+
+	k_work_queue_init(&priv->work_queue);
+	k_work_init(&priv->on_connect_work, priv_on_port_connect);
+	k_work_init(&priv->on_disconnect_work, priv_on_port_disconnect);
+	k_work_init(&priv->on_reset_work, priv_on_reset);
+	k_work_init(&priv->on_xfer_update_work, priv_on_xfer_update);
+	k_work_init(&priv->on_new_xfer_work, priv_on_new_xfer);
+	k_work_init_delayable(&priv->delayed_reset_work, priv_delayed_reset);
+
+	k_work_queue_start(&priv->work_queue,
+					   work_thread_stack, K_THREAD_STACK_SIZEOF(work_thread_stack),
+					   K_PRIO_COOP(2), NULL);
 
 	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority), uhc_stm32_irq, DEVICE_DT_INST_GET(0), 0);
 
