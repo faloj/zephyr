@@ -49,13 +49,13 @@ enum usb_speed {
 	USB_SPEED_SUPER   =  3,
 };
 
-enum phy_type {
-	PHY_INVALID     = -1,
-	PHY_EMBEDDED_FS =  0,
+enum phy_interface {
+	PHY_INVALID       = -1,
+	PHY_EXTERNAL_ULPI = HCD_PHY_ULPI,
+	PHY_EMBEDDED_FS   = HCD_PHY_EMBEDDED,
 #if defined(USB_OTG_HS_EMBEDDED_PHY)
-	PHY_EMBEDDED_HS,
+	PHY_EMBEDDED_HS   = USB_OTG_HS_EMBEDDED_PHY,
 #endif
-	PHY_EXTERNAL_ULPI,
 };
 
 enum uhc_state {
@@ -69,7 +69,7 @@ struct uhc_stm32_data {
 	const struct device * dev;
 	bool busy_pipe[NB_MAX_PIPE];
 	uint8_t control_pipe;
-	HCD_HandleTypeDef hcd;
+	HCD_HandleTypeDef *hcd_ptr;
 	struct uhc_transfer *ongoing_xfer;
 	struct net_buf_simple_state ongoing_xfer_buf_save;
 	size_t ongoing_xfer_err_cpt;
@@ -84,7 +84,7 @@ struct uhc_stm32_data {
 
 struct uhc_stm32_config {
 	uint32_t irq;
-	enum phy_type phy;
+	enum phy_interface phy;
 	size_t num_host_channels;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	size_t num_clock;
@@ -111,12 +111,19 @@ struct uhc_stm32_config {
 )
 #endif
 
+#define SPEED_TO_HCD_INIT_SPEED(usb_speed) (           \
+	(usb_speed >= USB_SPEED_HIGH) ? HCD_SPEED_HIGH : ( \
+	(usb_speed == USB_SPEED_FULL) ? HCD_SPEED_FULL : ( \
+	(usb_speed == USB_SPEED_LOW) ? HCD_SPEED_LOW : (   \
+	HCD_SPEED_LOW)))                                   \
+)
+
 
 static inline enum usb_speed priv_get_current_speed(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(&(priv->hcd));
+	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(priv->hcd_ptr);
 
 	enum usb_speed speed = USB_SPEED_INVALID;
 
@@ -142,7 +149,7 @@ static void uhc_stm32_irq(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	HAL_HCD_IRQHandler((HCD_HandleTypeDef *)&priv->hcd);
+	HAL_HCD_IRQHandler(priv->hcd_ptr);
 
 	/* TODO: check WKUPINT to trigger UHC_EVT_RWUP */
 }
@@ -150,9 +157,6 @@ static void uhc_stm32_irq(const struct device *dev)
 void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
 {
 	ARG_UNUSED(hhcd);
-
-	//const struct device *dev = (const struct device *)hhcd->pData;
-	//struct uhc_stm32_data *priv = uhc_get_private(dev);
 }
 
 void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
@@ -182,9 +186,6 @@ void HAL_HCD_PortEnabled_Callback(HCD_HandleTypeDef *hhcd)
 void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 {
 	ARG_UNUSED(hhcd);
-
-	//const struct device *dev = (const struct device *)hhcd->pData;
-	//struct uhc_stm32_data *priv = uhc_get_private(dev);
 }
 
 void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
@@ -194,74 +195,6 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
-}
-
-static inline void priv_hcd_prepare(const struct device *dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	HCD_TypeDef *instance = priv->hcd.Instance;
-	memset(&priv->hcd, 0, sizeof(priv->hcd));
-	priv->hcd.Instance = instance;
-
-	priv->hcd.Init.Host_channels = config->num_host_channels;
-	priv->hcd.Init.dma_enable = 0;
-	priv->hcd.Init.battery_charging_enable = DISABLE;
-	priv->hcd.Init.use_external_vbus = DISABLE;
-	priv->hcd.Init.vbus_sensing_enable = DISABLE;
-
-	/* use pData to pass a reference to the device handler
-	 * to be able to retrieve it from the HAL callbacks
-	 */
-	priv->hcd.pData = (void *)dev;
-
-#if defined(USB_DRD_FS)
-// TODO: verify if there is possibility of multiple instances
-	if (priv->hcd.Instance == USB_DRD_FS) {
-		priv->hcd.Init.speed = HCD_SPEED_FULL;
-	}
-#endif
-
-#if defined(USB_OTG_HS)
-// TODO: verify if there is possibility of multiple instances
-	if (priv->hcd.Instance == USB_OTG_HS) {
-		switch (config->phy) {
-			case PHY_EMBEDDED_FS: {
-				priv->hcd.Init.phy_itface = HCD_PHY_EMBEDDED;
-			} break;
-#if defined(USB_OTG_HS_EMBEDDED_PHY)
-			case PHY_EMBEDDED_HS: {
-				priv->hcd.Init.phy_itface = USB_OTG_HS_EMBEDDED_PHY;
-			} break;
-#endif
-			case PHY_EXTERNAL_ULPI: {
-				priv->hcd.Init.phy_itface = USB_OTG_ULPI_PHY;
-				priv->hcd.Init.use_external_vbus = ENABLE;
-			} break;
-			case PHY_INVALID: {
-				__ASSERT_NO_MSG(0);
-			} break;
-		}
-		if (config->max_speed >= USB_SPEED_HIGH) {
-			priv->hcd.Init.speed = HCD_SPEED_HIGH;
-		} else {
-			priv->hcd.Init.speed = HCD_SPEED_FULL;
-		}
-	}
-#endif
-
-#if defined(USB_OTG_FS)
-// TODO: verify if there is possibility of multiple instances
-	if (priv->hcd.Instance == USB_OTG_FS) {
-		if (config->phy != PHY_EMBEDDED_FS) {
-			LOG_DBG("Unsupported PHY."
-				"USB controller will default to embedded full-speed only PHY.");
-		}
-		priv->hcd.Init.phy_itface = HCD_PHY_EMBEDDED;
-		priv->hcd.Init.speed = HCD_SPEED_FULL;
-	}
-#endif
 }
 
 static int uhc_stm32_lock(const struct device *dev)
@@ -412,9 +345,7 @@ static int uhc_stm32_init(const struct device *dev)
 	}
 #endif
 
-	priv_hcd_prepare(dev);
-
-	HAL_StatusTypeDef status = HAL_HCD_Init(&(priv->hcd));
+	HAL_StatusTypeDef status = HAL_HCD_Init(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
 		LOG_ERR("HCD_Init failed, %d", (int)status);
@@ -472,7 +403,7 @@ static int uhc_stm32_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8
 		return -ENODEV;
 	}
 
-	HAL_StatusTypeDef status = HAL_HCD_HC_Init(&(priv->hcd),
+	HAL_StatusTypeDef status = HAL_HCD_HC_Init(priv->hcd_ptr,
 		*pipe_id, USB_EP_GET_IDX(ep),
         dev_addr, speed,
 		ep_type, mps
@@ -498,7 +429,7 @@ static int uhc_stm32_close_pipe(const struct device *dev, uint8_t pipe_id)
 		return -EALREADY;
 	}
 
-	HAL_StatusTypeDef status = HAL_HCD_HC_Halt(&(priv->hcd), pipe_id);
+	HAL_StatusTypeDef status = HAL_HCD_HC_Halt(priv->hcd_ptr, pipe_id);
 	if (status != HAL_OK) {
 		return -EIO;
 	}
@@ -521,8 +452,8 @@ static inline int uhc_stm32_retreive_pipe_id(const struct device *dev,
 	size_t i;
 	for(i = 0; i < config->num_host_channels; i++) {
 		if (priv->busy_pipe[i] == true) {
-			if ((priv->hcd.hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
-				(priv->hcd.hc[i].dev_addr == addr)) {
+			if ((priv->hcd_ptr->hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
+				(priv->hcd_ptr->hc[i].dev_addr == addr)) {
 				*pipe_id = i;
 				found = true;
 				break;
@@ -570,7 +501,7 @@ static int uhc_stm32_enable(const struct device *dev)
 
 	irq_enable(config->irq);
 
-	HAL_StatusTypeDef status = HAL_HCD_Start(&priv->hcd);
+	HAL_StatusTypeDef status = HAL_HCD_Start(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
 		LOG_ERR("HCD_Start failed (%d)", (int)status);
@@ -607,7 +538,7 @@ static int uhc_stm32_disable(const struct device *dev)
 		}
 	}
 
-	HAL_StatusTypeDef status = HAL_HCD_Stop(&priv->hcd);
+	HAL_StatusTypeDef status = HAL_HCD_Stop(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
 		LOG_ERR("HCD_Stop failed (%d)", (int)status);
@@ -624,7 +555,7 @@ static int uhc_stm32_shutdown(const struct device *dev)
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
 
-	HAL_StatusTypeDef status = HAL_HCD_DeInit(&priv->hcd);
+	HAL_StatusTypeDef status = HAL_HCD_DeInit(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
 		LOG_ERR("HAL_HCD_DeInit failed (%d)", (int)status);
@@ -651,7 +582,7 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	HAL_HCD_ResetPort(&priv->hcd);
+	HAL_HCD_ResetPort(priv->hcd_ptr);
 
 	return 0;
 }
@@ -660,7 +591,7 @@ static int uhc_stm32_sof_enable(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
 	if (!READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP) &&
 	    !READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
@@ -676,7 +607,7 @@ static int uhc_stm32_bus_suspend(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
 	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP)) {
 		return -EALREADY;
@@ -694,7 +625,7 @@ static int uhc_stm32_bus_resume(const struct device *dev)
 	// TODO : handle WKUPIN into IRQ handler
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-  	uint32_t USBx_BASE = (uint32_t)priv->hcd.Instance;
+	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
 	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
 		return -EBUSY;
@@ -768,7 +699,7 @@ static inline int uhc_stm32_submit_request(const struct device *dev,
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(&priv->hcd,
+	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(priv->hcd_ptr,
 		chan_num, direction, ep_type, token, buf, length, 0
 	);
 
@@ -932,7 +863,7 @@ static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct dev
 		__ASSERT_NO_MSG(0);
 	}
 
-	return HAL_HCD_HC_GetURBState(&(priv->hcd), pipe_id);
+	return HAL_HCD_HC_GetURBState(priv->hcd_ptr, pipe_id);
 }
 
 static void uhc_stm32_xfer_end(const struct device *dev, const int err) {
@@ -1147,8 +1078,6 @@ static const struct uhc_api uhc_stm32_api = {
 	.ep_dequeue = uhc_stm32_ep_dequeue,
 };
 
-K_THREAD_STACK_DEFINE(work_thread_stack, CONFIG_UHC_STM32_DRV_THREAD_STACK_SIZE);
-
 static void uhc_stm32_driver_preinit_common(const struct device *dev)
 {
 	struct uhc_data *data = dev->data;
@@ -1171,195 +1100,154 @@ static void uhc_stm32_driver_preinit_common(const struct device *dev)
 	k_work_init(&priv->on_xfer_update_work, priv_on_xfer_update);
 	k_work_init(&priv->on_new_xfer_work, priv_on_new_xfer);
 	k_work_init_delayable(&priv->delayed_reset_work, priv_delayed_reset);
-
-	k_work_queue_start(&priv->work_queue,
-					   work_thread_stack, K_THREAD_STACK_SIZEOF(work_thread_stack),
-					   K_PRIO_COOP(2), NULL);
 }
 
-#define DT_PHY(node_id)           DT_PHANDLE(node_id, phys)
+
+#define UHC_STM32_INIT_FUNC_NAME(node_id) uhc_stm32_driver_init_##node_id
+
+#define UHC_STM32_INIT_FUNC(node_id)                                                               \
+	static int UHC_STM32_INIT_FUNC_NAME(node_id)(const struct device *dev)                         \
+	{                                                                                              \
+		struct uhc_stm32_data *priv = uhc_get_private(dev);                                        \
+		                                                                                           \
+		uhc_stm32_driver_preinit_common(dev);                                                      \
+		                                                                                           \
+		k_work_queue_start(&priv->work_queue,                                                      \
+		   uhc_work_thread_stack_##node_id,                                                        \
+		   K_THREAD_STACK_SIZEOF(uhc_work_thread_stack_##node_id),                                 \
+		   K_PRIO_COOP(2),                                                                         \
+		   NULL                                                                                    \
+		);                                                                                          \
+	                                                                                               \
+		IRQ_CONNECT(DT_IRQN(node_id),                                                              \
+			DT_IRQ(node_id, priority), uhc_stm32_irq,                                              \
+			DEVICE_DT_GET(node_id), 0                                                              \
+		);                                                                                         \
+	                                                                                               \
+		return 0;                                                                                  \
+	}
+
+
+#define DT_PHY(node_id) DT_PHANDLE(node_id, phys)
+#define DT_MAX_SPEED_OR(node_id, default_speed) \
+	DT_ENUM_IDX_OR(node_id, maximum_speed, default_speed)
+
+
 #define DT_PHY_COMPAT_EMBEDDED_FS usb_nop_xceiv
 #define DT_PHY_COMPAT_EMBEDDED_HS st_stm32_usbphyc
 #define DT_PHY_COMPAT_ULPI        usb_ulpi_phy
 
-#define DT_MAX_SPEED_OR(node_id, default_speed) \
-	DT_ENUM_IDX_OR(node_id, maximum_speed, default_speed)
-
-#define GET_MAX_SPEED(node_id, phy_max_speed) \
-	MIN(DT_MAX_SPEED_OR(node_id, phy_max_speed), phy_max_speed)
-
-#define UHC_STM32_INIT_FUNC_NAME(node_id) uhc_stm32_driver_init_##node_id
-
-#define UHC_STM32_INIT_FUNC(node_id)                                   \
-static int UHC_STM32_INIT_FUNC_NAME(node_id)(const struct device *dev) \
-{                                                                      \
-	uhc_stm32_driver_preinit_common(dev);                              \
-                                                                       \
-	IRQ_CONNECT(DT_IRQN(node_id),                                      \
-		DT_IRQ(node_id, priority), uhc_stm32_irq,                      \
-		DEVICE_DT_GET(node_id), 0                                      \
-	);                                                                 \
-                                                                       \
-	return 0;                                                          \
-}
-
-// TODO: use IF_ENABLED macro
 
 #if defined(USB_OTG_HS_EMBEDDED_PHY)
-#define GET_PHY_TYPE(node_id) ( \
+#define GET_PHY_INTERFACE(node_id) ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS) ? PHY_EMBEDDED_FS : ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_HS) ? PHY_EMBEDDED_HS : ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI) ? PHY_EXTERNAL_ULPI: (       \
 	PHY_INVALID))) \
 )
-#define GET_PHY_MAX_SPEED_FROM_TYPE(phy_type) ( \
-	(phy_type == PHY_EMBEDDED_FS) ? USB_SPEED_FULL : (  \
-	(phy_type == PHY_EMBEDDED_HS) ? USB_SPEED_HIGH : (  \
-	(phy_type == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
+#define _GET_PHY_MAX_SPEED(phy_interface) ( \
+	(phy_interface == PHY_EMBEDDED_FS) ? USB_SPEED_FULL : (  \
+	(phy_interface == PHY_EMBEDDED_HS) ? USB_SPEED_HIGH : (  \
+	(phy_interface == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
 	USB_SPEED_INVALID))) \
 )
 #else
-#define GET_PHY_TYPE(node_id) ( \
+#define GET_PHY_INTERFACE(node_id) ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS) ? PHY_EMBEDDED_FS : ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI) ? PHY_EXTERNAL_ULPI: ( \
 	PHY_INVALID)) \
 )
-#define GET_PHY_MAX_SPEED_FROM_TYPE(phy_type) ( \
-	(phy_type == PHY_EMBEDDED_FS) ? USB_SPEED_FULL :  ( \
-	(phy_type == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
+#define _GET_PHY_MAX_SPEED(phy_interface) ( \
+	(phy_interface == PHY_EMBEDDED_FS) ? USB_SPEED_FULL :  ( \
+	(phy_interface == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
 	USB_SPEED_INVALID)) \
 )
 #endif
 
-#define GET_PHY_MAX_SPEED(node_id) GET_PHY_MAX_SPEED_FROM_TYPE(GET_PHY_TYPE(node_id))
+#define GET_PHY_MAX_SPEED(node_id) _GET_PHY_MAX_SPEED(GET_PHY_INTERFACE(node_id))
 
+#define GET_MAX_SPEED(node_id, core_max_speed) \
+	MIN(MIN(DT_MAX_SPEED_OR(node_id, core_max_speed), core_max_speed), GET_PHY_MAX_SPEED(node_id))
+
+
+#define STM32_INIT_COMMON(node_id, core_max_speed)                                                 \
+	PINCTRL_DT_DEFINE(node_id);                                                                    \
+	                                                                                               \
+	BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                                 \
+		"Invalid number of element in \"clock\" property in device tree");                         \
+	BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                               \
+		"Invalid number of host channels");                                                        \
+	BUILD_ASSERT(GET_PHY_INTERFACE(node_id) != PHY_INVALID,                                        \
+		"Unsupported or incompatible USB PHY defined in device tree");                             \
+	BUILD_ASSERT(GET_MAX_SPEED(node_id, core_max_speed) != USB_SPEED_INVALID,                      \
+		"Invalid usb speed");                                                                      \
+	                                                                                               \
+	static const struct uhc_stm32_config uhc_config_##node_id = {                                  \
+		.irq = DT_IRQN(node_id),                                                                   \
+		.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                                \
+		.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_id, vbus_gpios, {0}),                         \
+		.clocks = STM32_DT_CLOCKS(node_id),                                                        \
+		.num_clock = DT_NUM_CLOCKS(node_id),                                                       \
+		.num_host_channels = DT_PROP(node_id, num_host_channels),                                  \
+		.phy = GET_PHY_INTERFACE(node_id),                                                         \
+		.max_speed = GET_MAX_SPEED(node_id, core_max_speed),                                       \
+		.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                 \
+	};                                                                                             \
+	                                                                                               \
+	HCD_HandleTypeDef uhc_stm32_hcd_##node_id = {                                                  \
+		.pData = (void*) DEVICE_DT_GET(node_id),                                                   \
+		.Instance = (HCD_TypeDef *) DT_REG_ADDR(node_id),                                          \
+		.Init = {                                                                                  \
+			.Host_channels = DT_PROP(node_id, num_host_channels),                                  \
+			.dma_enable = 0,                                                                       \
+			.battery_charging_enable = DISABLE,                                                    \
+			.use_external_vbus = DISABLE,                                                          \
+			.vbus_sensing_enable = (                                                               \
+				(GET_PHY_INTERFACE(node_id) == PHY_EXTERNAL_ULPI) ? ENABLE : DISABLE               \
+			),                                                                                     \
+			.speed = SPEED_TO_HCD_INIT_SPEED(GET_MAX_SPEED(node_id, core_max_speed)),              \
+			.phy_itface = uhc_config_##node_id.phy,                                                \
+		},                                                                                         \
+	};                                                                                             \
+	                                                                                               \
+	static struct uhc_stm32_data uhc_priv_data_##node_id = {                                       \
+		.hcd_ptr = &(uhc_stm32_hcd_##node_id),                                                     \
+	};                                                                                             \
+	                                                                                               \
+	static struct uhc_data uhc_data_##node_id = {                                                  \
+		.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                                    \
+		.priv = &uhc_priv_data_##node_id,                                                          \
+	};                                                                                             \
+	                                                                                               \
+	static K_THREAD_STACK_DEFINE(                                                                  \
+		uhc_work_thread_stack_##node_id,                                                           \
+		CONFIG_UHC_STM32_DRV_THREAD_STACK_SIZE                                                     \
+	);                                                                                             \
+	                                                                                               \
+	UHC_STM32_INIT_FUNC(node_id);                                                                  \
+	                                                                                               \
+	DEVICE_DT_DEFINE(node_id, UHC_STM32_INIT_FUNC_NAME(node_id), NULL,                             \
+	                 &uhc_data_##node_id, &uhc_config_##node_id,                                   \
+	                 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                              \
+	                 &uhc_stm32_api);
+
+
+#define STM32_USB_INIT(node_id)                                                                    \
+	BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),                   \
+		"Invalid PHY defined in device tree");                                                     \
+	                                                                                               \
+	STM32_INIT_COMMON(node_id, USB_SPEED_FULL)
+
+#define STM32_OTGFS_INIT(node_id)                                                                  \
+	BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),                   \
+		"Invalid PHY defined in device tree");                                                     \                                                                               \
+	                                                                                               \
+   STM32_INIT_COMMON(node_id, USB_SPEED_FULL)
 
 #define STM32_OTGHS_INIT(node_id)                                                                  \
-                                                                                                   \
-PINCTRL_DT_DEFINE(node_id);                                                                        \
-								                                                                   \
-BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                                     \
-	"Invalid number of element in \"clock\" property in device tree");                             \
-BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                                   \
-	"Invalid number of host channels");                                                            \
-BUILD_ASSERT(GET_PHY_TYPE(node_id) != PHY_INVALID,                                                 \
-	"Unsupported or incompatible USB PHY defined in device tree");                                 \
-BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
-	"Invalid usb speed");                                                                          \
-                                                                                                   \
-static const struct uhc_stm32_config uhc_config_##node_id = {                                      \
-	.irq = DT_IRQN(node_id),                                                                       \
-	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                                    \
-	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_id, vbus_gpios, {0}),                             \
-	.clocks = STM32_DT_CLOCKS(node_id),                                                            \
-	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
-	.num_host_channels = DT_PROP(node_id, num_host_channels),                                      \
-	.phy = GET_PHY_TYPE(node_id),                                                                  \
-	.max_speed = GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)),                               \
-	.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                     \
-};                                                                                                 \
-                                                                                                   \
-static struct uhc_stm32_data uhc_priv_data_##node_id = {                                           \
-	.hcd.Instance = (HCD_TypeDef *) DT_REG_ADDR(node_id),                                          \
-};                                                                                                 \
-                                                                                                   \
-static struct uhc_data uhc_data_##node_id = {                                                      \
-	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                                        \
-	.priv = &uhc_priv_data_##node_id,                                                              \
-};                                                                                                 \
-                                                                                                   \
-UHC_STM32_INIT_FUNC(node_id);                                                                      \
-                                                                                                   \
-DEVICE_DT_DEFINE(node_id, UHC_STM32_INIT_FUNC_NAME(node_id), NULL,                                 \
-				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
-				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
-				 &uhc_stm32_api);
+	STM32_INIT_COMMON(node_id, USB_SPEED_HIGH)
 
 
-#define STM32_OTGFS_INIT(node_id)                                                 \
-                                                                                  \
-PINCTRL_DT_DEFINE(node_id);                                                       \
-								                                                  \
-BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                    \
-	"Invalid number of element in \"clock\" property in device tree");            \
-BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                  \
-	"Invalid number of host channels");                                           \
-BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
-	"Invalid PHY defined in device tree");                                        \
-BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
-	"Invalid usb speed");                                                                          \
-                                                                                  \
-static const struct uhc_stm32_config uhc_config_##node_id = {                     \
-	.irq = DT_IRQN(node_id),                                                      \
-	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                   \
-	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_id, vbus_gpios, {0}),            \
-	.clocks = STM32_DT_CLOCKS(node_id),                                           \
-	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
-	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = GET_MAX_SPEED(node_id, USB_SPEED_FULL),                  \
-	.phy = PHY_EMBEDDED_FS,                                                       \
-};                                                                                \
-                                                                                  \
-static struct uhc_stm32_data uhc_priv_data_##node_id = {                                           \
-	.hcd.Instance = (HCD_TypeDef *) DT_REG_ADDR(node_id),                                          \
-};   \
-                                                                                  \
-static struct uhc_data uhc_data_##node_id = {                                     \
-	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                       \
-	.priv = &uhc_priv_data_##node_id,                                             \
-};                                                                                                 \
-																								   \
-UHC_STM32_INIT_FUNC(node_id);                                                                      \
-																								   \
-																								   \
-DEVICE_DT_DEFINE(node_id, UHC_STM32_INIT_FUNC_NAME(node_id), NULL,                                 \
-				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
-				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
-				 &uhc_stm32_api);
-
-
-#define STM32_USB_INIT(node_id)                                                   \
-                                                                                  \
-PINCTRL_DT_DEFINE(node_id);                                                       \
-								                                                  \
-BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                    \
-	"Invalid number of element in \"clock\" property in device tree");            \
-BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                  \
-	"Invalid number of host channels");                                           \
-BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
-	"Invalid PHY defined in device tree");                                        \
-BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
-	"Invalid usb speed");                                                                          \
-                                                                                  \
-static const struct uhc_stm32_config uhc_config_##node_id = {                     \
-	.irq = DT_IRQN(node_id),                                                      \
-	.pcfg = PINCTRL_DT_DEV_CONFIG_GET(node_id),                                   \
-	.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_id, vbus_gpios, {0}),            \
-	.clocks = STM32_DT_CLOCKS(node_id),                                           \
-	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
-	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = GET_MAX_SPEED(node_id, USB_SPEED_FULL),                  \
-	.phy = PHY_EMBEDDED_FS,                                                       \
-};                                                                                \
-                                                                                  \
-static struct uhc_stm32_data uhc_priv_data_##node_id = {                                           \
-	.hcd.Instance = (HCD_TypeDef *) DT_REG_ADDR(node_id),                                          \
-};                                                                                     \
-                                                                                  \
-static struct uhc_data uhc_data_##node_id = {                                     \
-	.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                       \
-	.priv = &uhc_priv_data_##node_id,                                             \
-};                                                                                                 \
-																								   \
-UHC_STM32_INIT_FUNC(node_id);                                                                      \
-																								   \
-																								   \
-DEVICE_DT_DEFINE(node_id, UHC_STM32_INIT_FUNC_NAME(node_id), NULL,                                 \
-				 &uhc_data_##node_id, &uhc_config_##node_id,                                       \
-				 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,                                  \
-				 &uhc_stm32_api);
-
-
-DT_FOREACH_STATUS_OKAY(st_stm32_otghs, STM32_OTGHS_INIT)
-DT_FOREACH_STATUS_OKAY(st_stm32_otgfs, STM32_OTGFS_INIT)
 DT_FOREACH_STATUS_OKAY(st_stm32_usb, STM32_USB_INIT)
+DT_FOREACH_STATUS_OKAY(st_stm32_otgfs, STM32_OTGFS_INIT)
+DT_FOREACH_STATUS_OKAY(st_stm32_otghs, STM32_OTGHS_INIT)
