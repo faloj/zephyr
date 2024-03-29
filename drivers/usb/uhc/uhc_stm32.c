@@ -38,24 +38,20 @@ BUILD_ASSERT(NB_MAX_PIPE <= UINT8_MAX);
 
 #define UHC_STM32_MAX_ERR (3U)
 
-enum dt_speed {
+enum usb_speed {
+	USB_SPEED_INVALID = -1,
 	/* Values are fixed by maximum-speed enum values order in
 	 * usb-controller.yaml dts binding file
 	 */
-	DT_ENUM_MAX_SPEED_LOW = 0,
-	DT_ENUM_MAX_SPEED_FULL = 1,
-	DT_ENUM_MAX_SPEED_HIGH = 2,
-	DT_ENUM_MAX_SPEED_SUPER = 3,
-};
-
-enum speed {
-	SPEED_LOW,
-	SPEED_FULL,
-	SPEED_HIGH,
+	USB_SPEED_LOW     =  0,
+	USB_SPEED_FULL    =  1,
+	USB_SPEED_HIGH    =  2,
+	USB_SPEED_SUPER   =  3,
 };
 
 enum phy_type {
-	PHY_EMBEDDED_FS = 0,
+	PHY_INVALID     = -1,
+	PHY_EMBEDDED_FS =  0,
 #if defined(USB_OTG_HS_EMBEDDED_PHY)
 	PHY_EMBEDDED_HS,
 #endif
@@ -92,49 +88,71 @@ struct uhc_stm32_config {
 	size_t num_host_channels;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	size_t num_clock;
-	enum dt_speed max_speed;
+	enum usb_speed max_speed;
 	const struct pinctrl_dev_config *pcfg;
 	struct gpio_dt_spec ulpi_reset_gpio;
 	struct gpio_dt_spec vbus_enable_gpio;
 };
 
-static inline enum speed priv_get_current_speed(const struct device *dev)
+static inline enum usb_speed priv_get_current_speed(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(&(priv->hcd));
 
-// TODO : see how to handle both
 #if defined(USB_DRD_FS)
-	switch (hal_speed) {
-		case USB_DRD_SPEED_LS: {
-			return SPEED_LOW;
-		} break;
-		case USB_DRD_SPEED_FS: {
-			return SPEED_FULL;
-		} break;
-		default: {
-			__ASSERT_NO_MSG(0);
-		} break;
+	if (priv->hcd.Instance == USB_DRD_FS) {
+		switch (hal_speed) {
+			case USB_DRD_SPEED_LS: {
+				return USB_SPEED_LOW;
+			} break;
+			case USB_DRD_SPEED_FS: {
+				return USB_SPEED_FULL;
+			} break;
+			default: {
+				__ASSERT_NO_MSG(0);
+			} break;
+		}
 	}
-#elif defined(USB_OTG_FS) || defined(USB_OTG_HS)
-	switch (hal_speed) {
-		case HPRT0_PRTSPD_LOW_SPEED: {
-			return SPEED_LOW;
-		} break;
-		case HPRT0_PRTSPD_FULL_SPEED: {
-			return SPEED_FULL;
-		} break;
-		case HPRT0_PRTSPD_HIGH_SPEED: {
-			return SPEED_HIGH;
-		} break;
-		default: {
-			__ASSERT_NO_MSG(0);
-		} break;
+#endif
+#if defined(USB_OTG_FS)
+	if (priv->hcd.Instance == USB_DRD_FS) {
+		switch (hal_speed) {
+			case HPRT0_PRTSPD_LOW_SPEED: {
+				return USB_SPEED_LOW;
+			} break;
+			case HPRT0_PRTSPD_FULL_SPEED: {
+				return USB_SPEED_FULL;
+			} break;
+			case HPRT0_PRTSPD_HIGH_SPEED: {
+				return USB_SPEED_HIGH;
+			} break;
+			default: {
+				__ASSERT_NO_MSG(0);
+			} break;
+		}
+	}
+#endif
+#if defined(USB_OTG_HS)
+	if (priv->hcd.Instance == USB_OTG_HS) {
+		switch (hal_speed) {
+			case HPRT0_PRTSPD_LOW_SPEED: {
+				return USB_SPEED_LOW;
+			} break;
+			case HPRT0_PRTSPD_FULL_SPEED: {
+				return USB_SPEED_FULL;
+			} break;
+			case HPRT0_PRTSPD_HIGH_SPEED: {
+				return USB_SPEED_HIGH;
+			} break;
+			default: {
+				__ASSERT_NO_MSG(0);
+			} break;
+		}
 	}
 #endif
 
-	return SPEED_LOW;
+	return USB_SPEED_LOW;
 }
 
 static void uhc_stm32_irq(const struct device *dev)
@@ -238,8 +256,11 @@ static inline void priv_hcd_prepare(const struct device *dev)
 				priv->hcd.Init.phy_itface = USB_OTG_ULPI_PHY;
 				priv->hcd.Init.use_external_vbus = ENABLE;
 			} break;
+			case PHY_INVALID: {
+				__ASSERT_NO_MSG(0);
+			} break;
 		}
-		if (config->max_speed >= DT_ENUM_MAX_SPEED_HIGH) {
+		if (config->max_speed >= USB_SPEED_HIGH) {
 			priv->hcd.Init.speed = HCD_SPEED_HIGH;
 		} else {
 			priv->hcd.Init.speed = HCD_SPEED_FULL;
@@ -1027,14 +1048,14 @@ void priv_on_reset(struct k_work *work)
 	LOG_DBG("Event : Reset");
 
 	// TODO: see what happen when this function is called but without any device connected
-	enum speed current_speed = priv_get_current_speed(priv->dev);
+	enum usb_speed current_speed = priv_get_current_speed(priv->dev);
 
 	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
 		priv->state = STM32_UHC_STATE_READY;
-		if (current_speed == SPEED_LOW) {
+		if (current_speed == USB_SPEED_LOW) {
 			LOG_DBG("LS");
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_LS, 0);
-		} else if (current_speed == SPEED_FULL) {
+		} else if (current_speed == USB_SPEED_FULL) {
 			LOG_DBG("FS");
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_FS, 0);
 		} else {
@@ -1050,12 +1071,12 @@ void priv_on_reset(struct k_work *work)
 		int err = 0;
 
 		// TODO : this open pipe thing is temporary
-		uint8_t pipe_speed = SPEED_LOW;
-		if (current_speed == SPEED_LOW) {
+		uint8_t pipe_speed = USB_SPEED_LOW;
+		if (current_speed == USB_SPEED_LOW) {
 			pipe_speed = HCD_DEVICE_SPEED_LOW;
-		} else if (current_speed == SPEED_FULL) {
+		} else if (current_speed == USB_SPEED_FULL) {
 			pipe_speed = HCD_DEVICE_SPEED_FULL;
-		} else if (current_speed == SPEED_HIGH) {
+		} else if (current_speed == USB_SPEED_HIGH) {
 			pipe_speed = HCD_DEVICE_SPEED_HIGH;
 		}
 		err = uhc_stm32_open_pipe(priv->dev,
@@ -1151,7 +1172,7 @@ static void uhc_stm32_driver_preinit_common(const struct device *dev)
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
 
-	if (config->max_speed >= DT_ENUM_MAX_SPEED_HIGH) {
+	if (config->max_speed >= USB_SPEED_HIGH) {
 		data->caps.hs = 1;
 	} else {
 		data->caps.hs = 0;
@@ -1205,25 +1226,25 @@ static int UHC_STM32_INIT_FUNC_NAME(node_id)(const struct device *dev) \
 #define GET_PHY_TYPE(node_id) ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS) ? PHY_EMBEDDED_FS : ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_HS) ? PHY_EMBEDDED_HS : ( \
-	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI) ? PHY_EXTERNAL_ULPI: ( \
-	-1))) \
+	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI) ? PHY_EXTERNAL_ULPI: (       \
+	PHY_INVALID))) \
 )
 #define GET_PHY_MAX_SPEED_FROM_TYPE(phy_type) ( \
-	(phy_type == PHY_EMBEDDED_FS) ? DT_ENUM_MAX_SPEED_FULL : ( \
-	(phy_type == PHY_EMBEDDED_HS) ? DT_ENUM_MAX_SPEED_HIGH : ( \
-	(phy_type == PHY_EXTERNAL_ULPI) ? DT_ENUM_MAX_SPEED_HIGH: ( \
-	-1))) \
+	(phy_type == PHY_EMBEDDED_FS) ? USB_SPEED_FULL : (  \
+	(phy_type == PHY_EMBEDDED_HS) ? USB_SPEED_HIGH : (  \
+	(phy_type == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
+	USB_SPEED_INVALID))) \
 )
 #else
 #define GET_PHY_TYPE(node_id) ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS) ? PHY_EMBEDDED_FS : ( \
 	DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_ULPI) ? PHY_EXTERNAL_ULPI: ( \
-	-1)) \
+	PHY_INVALID)) \
 )
 #define GET_PHY_MAX_SPEED_FROM_TYPE(phy_type) ( \
-	(phy_type == PHY_EMBEDDED_FS) ? DT_ENUM_MAX_SPEED_FULL : ( \
-	(phy_type == PHY_EXTERNAL_ULPI) ? DT_ENUM_MAX_SPEED_HIGH: ( \
-	-1)) \
+	(phy_type == PHY_EMBEDDED_FS) ? USB_SPEED_FULL :  ( \
+	(phy_type == PHY_EXTERNAL_ULPI) ? USB_SPEED_HIGH: ( \
+	USB_SPEED_INVALID)) \
 )
 #endif
 
@@ -1238,8 +1259,10 @@ BUILD_ASSERT(DT_NUM_CLOCKS(node_id) <= DT_CLOCKS_PROP_MAX_LEN,                  
 	"Invalid number of element in \"clock\" property in device tree");                             \
 BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                                   \
 	"Invalid number of host channels");                                                            \
-BUILD_ASSERT(GET_PHY_TYPE(node_id) != -1,                                                          \
+BUILD_ASSERT(GET_PHY_TYPE(node_id) != PHY_INVALID,                                                 \
 	"Unsupported or incompatible USB PHY defined in device tree");                                 \
+BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
+	"Invalid usb speed");                                                                          \
                                                                                                    \
 static const struct uhc_stm32_config uhc_config_##node_id = {                                      \
 	.irq = DT_IRQN(node_id),                                                                       \
@@ -1280,6 +1303,8 @@ BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                
 	"Invalid number of host channels");                                           \
 BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
 	"Invalid PHY defined in device tree");                                        \
+BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
+	"Invalid usb speed");                                                                          \
                                                                                   \
 static const struct uhc_stm32_config uhc_config_##node_id = {                     \
 	.irq = DT_IRQN(node_id),                                                      \
@@ -1288,7 +1313,7 @@ static const struct uhc_stm32_config uhc_config_##node_id = {                   
 	.clocks = STM32_DT_CLOCKS(node_id),                                           \
 	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
 	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = GET_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                  \
+	.max_speed = GET_MAX_SPEED(node_id, USB_SPEED_FULL),                  \
 	.phy = PHY_EMBEDDED_FS,                                                       \
 };                                                                                \
                                                                                   \
@@ -1320,6 +1345,8 @@ BUILD_ASSERT(DT_PROP(node_id, num_host_channels) <= NB_MAX_PIPE,                
 	"Invalid number of host channels");                                           \
 BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_PHY(node_id), DT_PHY_COMPAT_EMBEDDED_FS),      \
 	"Invalid PHY defined in device tree");                                        \
+BUILD_ASSERT(GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)) != USB_SPEED_INVALID,              \
+	"Invalid usb speed");                                                                          \
                                                                                   \
 static const struct uhc_stm32_config uhc_config_##node_id = {                     \
 	.irq = DT_IRQN(node_id),                                                      \
@@ -1328,7 +1355,7 @@ static const struct uhc_stm32_config uhc_config_##node_id = {                   
 	.clocks = STM32_DT_CLOCKS(node_id),                                           \
 	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
 	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = GET_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                  \
+	.max_speed = GET_MAX_SPEED(node_id, USB_SPEED_FULL),                  \
 	.phy = PHY_EMBEDDED_FS,                                                       \
 };                                                                                \
                                                                                   \
