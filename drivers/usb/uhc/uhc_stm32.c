@@ -94,65 +94,48 @@ struct uhc_stm32_config {
 	struct gpio_dt_spec vbus_enable_gpio;
 };
 
+#if defined(USB_DRD_FS)
+#define SPEED_FROM_DRD_CORE_ST_SPEED_DEF(drd_core_speed) (     \
+	(drd_core_speed == USB_DRD_SPEED_LS) ? USB_SPEED_FULL : (  \
+	(drd_core_speed == USB_DRD_SPEED_FS) ? USB_SPEED_HIGH : (  \
+	USB_SPEED_INVALID))                                        \
+)
+#endif
+
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+#define SPEED_FROM_OTG_CORE_ST_SPEED_DEF(otg_core_speed) (            \
+	(otg_core_speed == HPRT0_PRTSPD_LOW_SPEED) ? USB_SPEED_FULL : (   \
+	(otg_core_speed == HPRT0_PRTSPD_FULL_SPEED) ? USB_SPEED_HIGH : (  \
+	(otg_core_speed == HPRT0_PRTSPD_HIGH_SPEED) ? USB_SPEED_HIGH : (  \
+	USB_SPEED_INVALID)))                                              \
+)
+#endif
+
+
 static inline enum usb_speed priv_get_current_speed(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(&(priv->hcd));
 
+	enum usb_speed speed = USB_SPEED_INVALID;
+
 #if defined(USB_DRD_FS)
-	if (priv->hcd.Instance == USB_DRD_FS) {
-		switch (hal_speed) {
-			case USB_DRD_SPEED_LS: {
-				return USB_SPEED_LOW;
-			} break;
-			case USB_DRD_SPEED_FS: {
-				return USB_SPEED_FULL;
-			} break;
-			default: {
-				__ASSERT_NO_MSG(0);
-			} break;
-		}
-	}
+	speed = SPEED_FROM_DRD_CORE_ST_SPEED_DEF(hal_speed);
 #endif
-#if defined(USB_OTG_FS)
-	if (priv->hcd.Instance == USB_DRD_FS) {
-		switch (hal_speed) {
-			case HPRT0_PRTSPD_LOW_SPEED: {
-				return USB_SPEED_LOW;
-			} break;
-			case HPRT0_PRTSPD_FULL_SPEED: {
-				return USB_SPEED_FULL;
-			} break;
-			case HPRT0_PRTSPD_HIGH_SPEED: {
-				return USB_SPEED_HIGH;
-			} break;
-			default: {
-				__ASSERT_NO_MSG(0);
-			} break;
-		}
-	}
-#endif
-#if defined(USB_OTG_HS)
-	if (priv->hcd.Instance == USB_OTG_HS) {
-		switch (hal_speed) {
-			case HPRT0_PRTSPD_LOW_SPEED: {
-				return USB_SPEED_LOW;
-			} break;
-			case HPRT0_PRTSPD_FULL_SPEED: {
-				return USB_SPEED_FULL;
-			} break;
-			case HPRT0_PRTSPD_HIGH_SPEED: {
-				return USB_SPEED_HIGH;
-			} break;
-			default: {
-				__ASSERT_NO_MSG(0);
-			} break;
-		}
-	}
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	speed = SPEED_FROM_OTG_CORE_ST_SPEED_DEF(hal_speed);
 #endif
 
-	return USB_SPEED_LOW;
+	if (speed == USB_SPEED_INVALID) {
+		LOG_DBG("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\" (%d)", hal_speed);
+		__ASSERT_NO_MSG(0);
+
+		/* Falling back to low speed */
+		speed = USB_SPEED_LOW;
+	}
+
+	return speed;
 }
 
 static void uhc_stm32_irq(const struct device *dev)
