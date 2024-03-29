@@ -23,20 +23,9 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
-//#define LOCAL_LOG_DBG(msg, ...) printk("%d: uhc_stm32: %s: " msg "\n", k_uptime_get_32(), __FUNCTION__ __VA_OPT__(,) __VA_ARGS__)
-
-//#define LOCAL_LOG_DBG(msg, ...) LOG_PRINTK(msg __VA_OPT__(,) __VA_ARGS__)
-
-//#define LOCAL_LOG_DBG(msg, ...)
-
 #define LOCAL_LOG_DBG(msg, ...) LOG_DBG(msg __VA_OPT__(,) __VA_ARGS__)
 
 #define DT_CLOCKS_PROP_MAX_LEN (2)
-
-#define DT_PHY(node_id)           DT_PHANDLE(node_id, phys)
-#define DT_PHY_COMPAT_EMBEDDED_FS usb_nop_xceiv
-#define DT_PHY_COMPAT_EMBEDDED_HS st_stm32_usbphyc
-#define DT_PHY_COMPAT_ULPI        usb_ulpi_phy
 
 #define SETUP_PACKET_SIZE (8U)
 
@@ -59,10 +48,6 @@ enum dt_speed {
 	DT_ENUM_MAX_SPEED_SUPER = 3,
 };
 
-
-#define DT_MAX_SPEED(node_id, phy_max_speed) MIN(DT_ENUM_IDX_OR(node_id, maximum_speed, phy_max_speed), phy_max_speed)
-#define DT_MAX_SPEED_OR(node_id, default_speed) DT_ENUM_IDX_OR(node_id, maximum_speed, default_speed)
-
 enum speed {
 	SPEED_LOW,
 	SPEED_FULL,
@@ -84,13 +69,14 @@ enum uhc_state {
 };
 
 struct uhc_stm32_data {
+	enum uhc_state state;
+	const struct device * dev;
+	bool busy_pipe[NB_MAX_PIPE];
+	uint8_t control_pipe;
 	HCD_HandleTypeDef hcd;
-	struct k_event event_set;
 	struct uhc_transfer *ongoing_xfer;
 	struct net_buf_simple_state ongoing_xfer_buf_save;
 	size_t ongoing_xfer_err_cpt;
-	bool busy_pipe[NB_MAX_PIPE];
-	uint8_t control_pipe;
 	struct k_work_q work_queue;
 	struct k_work on_connect_work;
 	struct k_work on_disconnect_work;
@@ -98,8 +84,6 @@ struct uhc_stm32_data {
 	struct k_work on_xfer_update_work;
 	struct k_work on_new_xfer_work;
 	struct k_work_delayable delayed_reset_work;
-	enum uhc_state state;
-	const struct device * dev;
 };
 
 struct uhc_stm32_config {
@@ -113,17 +97,6 @@ struct uhc_stm32_config {
 	struct gpio_dt_spec ulpi_reset_gpio;
 	struct gpio_dt_spec vbus_enable_gpio;
 };
-
-typedef enum {
-	UHC_STM32_DEVICE_CONNECTED = 0,
-	UHC_STM32_BUS_RESETED = 1,
-	UHC_STM32_DEVICE_DISCONNECTED = 2,
-	UHC_STM32_SOF = 3,
-	UHC_STM32_NEW_XFER = 4,
-	UHC_STM32_URB_UPDATE = 5,
-} uhc_stm32_event_t;
-
-#define EVENT_BIT(event) (0x1 << event)
 
 static inline enum speed priv_get_current_speed(const struct device *dev)
 {
@@ -747,7 +720,6 @@ static int uhc_stm32_ep_enqueue(const struct device *dev, struct uhc_transfer *c
 	}
 
 	k_work_submit_to_queue(&priv->work_queue, &priv->on_new_xfer_work);
-	//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_NEW_XFER));
 
 	return 0;
 }
@@ -1013,11 +985,11 @@ static int uhc_stm32_xfer_update(const struct device *dev) {
 		// restore net buf to it's pristine state
 		net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 		// must retry
-		//k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
+		//k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
 	} else { // urb_state == URB_IDLE
 		LOCAL_LOG_DBG("NOPE!");
 		// must retry later
-		k_event_post(&priv->event_set, EVENT_BIT(UHC_STM32_URB_UPDATE));
+		k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
 		/* Nothing to do */
 		return 0;
 	}
@@ -1200,6 +1172,18 @@ static void uhc_stm32_driver_preinit_common(const struct device *dev)
 					   work_thread_stack, K_THREAD_STACK_SIZEOF(work_thread_stack),
 					   K_PRIO_COOP(2), NULL);
 }
+
+#define DT_PHY(node_id)           DT_PHANDLE(node_id, phys)
+#define DT_PHY_COMPAT_EMBEDDED_FS usb_nop_xceiv
+#define DT_PHY_COMPAT_EMBEDDED_HS st_stm32_usbphyc
+#define DT_PHY_COMPAT_ULPI        usb_ulpi_phy
+
+#define DT_MAX_SPEED_OR(node_id, default_speed) \
+	DT_ENUM_IDX_OR(node_id, maximum_speed, default_speed)
+
+#define GET_MAX_SPEED(node_id, phy_max_speed) \
+	MIN(DT_MAX_SPEED_OR(node_id, phy_max_speed), phy_max_speed)
+
 #define UHC_STM32_INIT_FUNC_NAME(node_id) uhc_stm32_driver_init_##node_id
 
 #define UHC_STM32_INIT_FUNC(node_id)                                   \
@@ -1265,7 +1249,7 @@ static const struct uhc_stm32_config uhc_config_##node_id = {                   
 	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
 	.num_host_channels = DT_PROP(node_id, num_host_channels),                                      \
 	.phy = GET_PHY_TYPE(node_id),                                                                  \
-	.max_speed = DT_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)),                                \
+	.max_speed = GET_MAX_SPEED(node_id, GET_PHY_MAX_SPEED(node_id)),                               \
 	.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                     \
 };                                                                                                 \
                                                                                                    \
@@ -1304,7 +1288,7 @@ static const struct uhc_stm32_config uhc_config_##node_id = {                   
 	.clocks = STM32_DT_CLOCKS(node_id),                                           \
 	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
 	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                   \
+	.max_speed = GET_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                  \
 	.phy = PHY_EMBEDDED_FS,                                                       \
 };                                                                                \
                                                                                   \
@@ -1344,7 +1328,7 @@ static const struct uhc_stm32_config uhc_config_##node_id = {                   
 	.clocks = STM32_DT_CLOCKS(node_id),                                           \
 	.num_clock = DT_NUM_CLOCKS(node_id),                                                           \
 	.num_host_channels = DT_PROP(node_id, num_host_channels),                     \
-	.max_speed = DT_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                   \
+	.max_speed = GET_MAX_SPEED(node_id, DT_ENUM_MAX_SPEED_FULL),                  \
 	.phy = PHY_EMBEDDED_FS,                                                       \
 };                                                                                \
                                                                                   \
