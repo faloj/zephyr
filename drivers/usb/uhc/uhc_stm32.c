@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2023 Syslinbit
+ * Copyright (c) 2024 Syslinbit
+ * Copyright (c) 2023 Linaro Limited
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,6 +26,7 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 #define LOCAL_LOG_DBG(msg, ...) LOG_DBG(msg __VA_OPT__(,) __VA_ARGS__)
 
+// TODO: rename ?
 #define DT_CLOCKS_PROP_MAX_LEN (2)
 
 #define SETUP_PACKET_SIZE (8U)
@@ -37,6 +39,29 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 BUILD_ASSERT(NB_MAX_PIPE <= UINT8_MAX);
 
 #define UHC_STM32_MAX_ERR (3U)
+
+
+#define _IS_DRIVER_OF_INSTANCE(dev, instance) \
+	(((struct uhc_stm32_data *) uhc_get_private(dev))->hcd_ptr->Instance == instance)
+
+#if defined(USB_OTG_FS)
+#define IS_USB_OTG_FS_DEVICE(dev) _IS_DRIVER_OF_INSTANCE(dev, USB_OTG_FS)
+#else
+#define IS_USB_OTG_FS_DEVICE(dev) (0)
+#endif
+
+#if defined(USB_OTG_HS)
+#define IS_USB_OTG_HS_DEVICE(dev) _IS_DRIVER_OF_INSTANCE(dev, USB_OTG_HS)
+#else
+#define IS_USB_OTG_HS_DEVICE(dev) (0)
+#endif
+
+#if defined(USB_DRD_FS)
+#define IS_USB_DRD_FS_DEVICE(dev) _IS_DRIVER_OF_INSTANCE(dev, USB_DRD_FS)
+#else
+#define IS_USB_DRD_FS_DEVICE(dev) (0)
+#endif
+
 
 enum usb_speed {
 	USB_SPEED_INVALID = -1,
@@ -95,7 +120,7 @@ struct uhc_stm32_config {
 };
 
 #if defined(USB_DRD_FS)
-#define SPEED_FROM_DRD_CORE_ST_SPEED_DEF(drd_core_speed) (     \
+#define SPEED_FROM_HAL_SPEED(drd_core_speed) (     \
 	(drd_core_speed == USB_DRD_SPEED_LS) ? USB_SPEED_FULL : (  \
 	(drd_core_speed == USB_DRD_SPEED_FS) ? USB_SPEED_HIGH : (  \
 	USB_SPEED_INVALID))                                        \
@@ -103,7 +128,7 @@ struct uhc_stm32_config {
 #endif
 
 #if defined(USB_OTG_FS) || defined(USB_OTG_HS)
-#define SPEED_FROM_OTG_CORE_ST_SPEED_DEF(otg_core_speed) (            \
+#define SPEED_FROM_HAL_SPEED(otg_core_speed) (            \
 	(otg_core_speed == HPRT0_PRTSPD_LOW_SPEED) ? USB_SPEED_FULL : (   \
 	(otg_core_speed == HPRT0_PRTSPD_FULL_SPEED) ? USB_SPEED_HIGH : (  \
 	(otg_core_speed == HPRT0_PRTSPD_HIGH_SPEED) ? USB_SPEED_HIGH : (  \
@@ -123,19 +148,12 @@ static inline enum usb_speed priv_get_current_speed(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	uint32_t hal_speed = HAL_HCD_GetCurrentSpeed(priv->hcd_ptr);
-
-	enum usb_speed speed = USB_SPEED_INVALID;
-
-#if defined(USB_DRD_FS)
-	speed = SPEED_FROM_DRD_CORE_ST_SPEED_DEF(hal_speed);
-#endif
-#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
-	speed = SPEED_FROM_OTG_CORE_ST_SPEED_DEF(hal_speed);
-#endif
+	enum usb_speed speed = SPEED_FROM_HAL_SPEED(
+		HAL_HCD_GetCurrentSpeed(priv->hcd_ptr)
+	);
 
 	if (speed == USB_SPEED_INVALID) {
-		LOG_DBG("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\" (%d)", hal_speed);
+		LOG_DBG("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\"");
 		__ASSERT_NO_MSG(0);
 
 		/* Falling back to low speed */
@@ -149,9 +167,8 @@ static void uhc_stm32_irq(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
+	/* The following HAL_HCD_* functions are called from there */
 	HAL_HCD_IRQHandler(priv->hcd_ptr);
-
-	/* TODO: check WKUPINT to trigger UHC_EVT_RWUP */
 }
 
 void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
@@ -197,20 +214,6 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 	k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
 }
 
-static int uhc_stm32_lock(const struct device *dev)
-{
-	return uhc_lock_internal(dev, K_FOREVER);
-}
-
-static int uhc_stm32_unlock(const struct device *dev)
-{
-	return uhc_unlock_internal(dev);
-}
-
-/* TODO : Factorize if possible. priv_clock_enable and priv_clock_disable are just a slightly
- * modified version taken from udc_stm32.c (under Copyright (c) 2023 Linaro Limited)
- */
-/***********************************************************************/
 static int priv_clock_enable(const struct device *dev)
 {
 	const struct uhc_stm32_config *config = dev->config;
@@ -257,6 +260,34 @@ static int priv_clock_enable(const struct device *dev)
 
 #endif /* RCC_CFGR_OTGFSPRE / RCC_CFGR_USBPRE */
 
+
+#if defined(CONFIG_SOC_SERIES_STM32H7X)
+	if(IS_USB_OTG_HS_DEVICE(dev)) {
+		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
+		if (config->phy == PHY_EXTERNAL_ULPI) {
+			LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
+		} else {
+			/* ULPI clock is activated by default in sleep mode. If we use an
+			   other PHY this will prevent the USB_OTG_HS controller to work
+			   properly when the MCU enters sleep mode so we must disable it.
+			*/
+			LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
+		}
+	}
+#if defined(USB_OTG_FS)
+	if (IS_USB_OTG_FS_DEVICE(dev)) {
+		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB2OTGHS);
+		/* USB_OTG_FS cannot be connected to an external ULPI PHY but
+		   ULPI clock is still activated by default in sleep mode
+		   (in run mode it is already disabled by default). This prevents
+		   the USB_OTG_FS controller to work properly when the MCU enters
+		   sleep mode so we must disable it.
+		 */
+		LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB2OTGHSULPI);
+	}
+#endif
+#endif
+
 	return 0;
 }
 
@@ -272,7 +303,126 @@ static int priv_clock_disable(const struct device *dev)
 
 	return 0;
 }
-/**********************************************************************/
+
+static int priv_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
+						  uint8_t dev_addr, uint8_t speed, uint8_t ep_type, uint16_t mps)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	const struct uhc_stm32_config *config = dev->config;
+
+	bool found = false;
+
+	size_t i;
+	for(i = 0; i < config->num_host_channels; i++) {
+		if (priv->busy_pipe[i] == false) {
+			*pipe_id = i;
+			found = true;
+			break;
+		}
+	}
+
+	if (found == false) {
+		return -ENODEV;
+	}
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_Init(priv->hcd_ptr,
+		*pipe_id, USB_EP_GET_IDX(ep),
+        dev_addr, speed,
+		ep_type, mps
+	);
+	if (status != HAL_OK) {
+		return -EIO;
+	}
+
+	priv->busy_pipe[i] = true;
+	return 0;
+}
+
+static int priv_close_pipe(const struct device *dev, uint8_t pipe_id)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	const struct uhc_stm32_config *config = dev->config;
+
+	if (pipe_id > config->num_host_channels) {
+		return -EINVAL;
+	}
+
+	if (priv->busy_pipe[pipe_id] != true) {
+		return -EALREADY;
+	}
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_Halt(priv->hcd_ptr, pipe_id);
+	if (status != HAL_OK) {
+		return -EIO;
+	}
+
+	priv->busy_pipe[pipe_id] = false;
+
+	return 0;
+}
+
+static int priv_retreive_pipe_id(const struct device *dev, const uint8_t ep,
+										const uint8_t addr, uint8_t * const pipe_id)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	const struct uhc_stm32_config *config = dev->config;
+
+	bool found = false;
+
+	size_t i;
+	for(i = 0; i < config->num_host_channels; i++) {
+		if (priv->busy_pipe[i] == true) {
+			if ((priv->hcd_ptr->hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
+				(priv->hcd_ptr->hc[i].dev_addr == addr)) {
+				*pipe_id = i;
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (!found) {
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static void priv_init_pipes(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+	const struct uhc_stm32_config *config = dev->config;
+
+	size_t i;
+	for(i = 0; i < config->num_host_channels; i++) {
+		priv->busy_pipe[i] = false;
+	}
+}
+
+static void priv_close_all_pipes(const struct device *dev)
+{
+	const struct uhc_stm32_config *config = dev->config;
+
+	size_t i;
+	for(i = 0; i < config->num_host_channels; i++) {
+		priv_close_pipe(dev, i);
+	}
+}
+
+static inline void priv_deinit_pipes(const struct device *dev)
+{
+	return priv_close_all_pipes(dev);
+}
+
+static int uhc_stm32_lock(const struct device *dev)
+{
+	return uhc_lock_internal(dev, K_FOREVER);
+}
+
+static int uhc_stm32_unlock(const struct device *dev)
+{
+	return uhc_unlock_internal(dev);
+}
 
 static int uhc_stm32_init(const struct device *dev)
 {
@@ -311,15 +461,7 @@ static int uhc_stm32_init(const struct device *dev)
 		}
 	}
 
-#if defined(CONFIG_SOC_SERIES_STM32U5X)
-	/* TODO */
-#elif defined(CONFIG_SOC_SERIES_STM32H5X)
-	/* TODO : test if it works */
-	LL_PWR_EnableUSBVoltageDetector();
-	while (LL_PWR_IsActiveFlag_VDDUSB() == 0) {
-		;
-	}
-#elif defined(CONFIG_SOC_SERIES_STM32H7X)
+#if defined(CONFIG_SOC_SERIES_STM32H7X)
 	/* TODO: useless with an ULPI phy ? */
 	LL_PWR_EnableUSBVoltageDetector();
 	while (LL_PWR_IsActiveFlag_USB() == 0) {
@@ -333,18 +475,6 @@ static int uhc_stm32_init(const struct device *dev)
 		return -EIO;
 	}
 
-#if defined(CONFIG_SOC_SERIES_STM32H7X)
-	// TODO: some devices have two USB : handle this case
-	LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
-	if (config->phy == PHY_EXTERNAL_ULPI) {
-		// TODO: same here
-		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
-	} else {
-		// TODO: same here
-		LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
-	}
-#endif
-
 	HAL_StatusTypeDef status = HAL_HCD_Init(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
@@ -353,145 +483,6 @@ static int uhc_stm32_init(const struct device *dev)
 	}
 
 	return 0;
-}
-
-/**
-  * @brief  Initialize a host channel.
-  * @param  hhcd HCD handle
-  * @param  ch_num Channel number.
-  *         This parameter can be a value from 1 to 15
-  * @param  epnum Endpoint number.
-  *          This parameter can be a value from 1 to 15
-  * @param  dev_address Current device address
-  *          This parameter can be a value from 0 to 255
-  * @param  speed Current device speed.
-  *          This parameter can be one of these values:
-  *            HCD_DEVICE_SPEED_HIGH: High speed mode,
-  *            HCD_DEVICE_SPEED_FULL: Full speed mode,
-  *            HCD_DEVICE_SPEED_LOW: Low speed mode
-  * @param  ep_type Endpoint Type.
-  *          This parameter can be one of these values:
-  *            EP_TYPE_CTRL: Control type,
-  *            EP_TYPE_ISOC: Isochronous type,
-  *            EP_TYPE_BULK: Bulk type,
-  *            EP_TYPE_INTR: Interrupt type
-  * @param  mps Max Packet Size.
-  *          This parameter can be a value from 0 to32K
-  * @retval HAL status
-  */
-HAL_StatusTypeDef HAL_HCD_HC_Init(HCD_HandleTypeDef *hhcd, uint8_t ch_num, uint8_t epnum,
-                                  uint8_t dev_address, uint8_t speed, uint8_t ep_type, uint16_t mps);
-
-static int uhc_stm32_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
-							   uint8_t dev_addr, uint8_t speed, uint8_t ep_type, uint16_t mps)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	bool found = false;
-
-	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
-		if (priv->busy_pipe[i] == false) {
-			*pipe_id = i;
-			found = true;
-			break;
-		}
-	}
-
-	if (found == false) {
-		return -ENODEV;
-	}
-
-	HAL_StatusTypeDef status = HAL_HCD_HC_Init(priv->hcd_ptr,
-		*pipe_id, USB_EP_GET_IDX(ep),
-        dev_addr, speed,
-		ep_type, mps
-	);
-	if (status != HAL_OK) {
-		return -EIO;
-	}
-
-	priv->busy_pipe[i] = true;
-	return 0;
-}
-
-static int uhc_stm32_close_pipe(const struct device *dev, uint8_t pipe_id)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	if (pipe_id > config->num_host_channels) {
-		return -EINVAL;
-	}
-
-	if (priv->busy_pipe[pipe_id] != true) {
-		return -EALREADY;
-	}
-
-	HAL_StatusTypeDef status = HAL_HCD_HC_Halt(priv->hcd_ptr, pipe_id);
-	if (status != HAL_OK) {
-		return -EIO;
-	}
-
-	priv->busy_pipe[pipe_id] = false;
-
-	return 0;
-}
-
-static inline int uhc_stm32_retreive_pipe_id(const struct device *dev,
-												const uint8_t ep,
-												const uint8_t addr,
-												uint8_t * const pipe_id)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	bool found = false;
-
-	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
-		if (priv->busy_pipe[i] == true) {
-			if ((priv->hcd_ptr->hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
-				(priv->hcd_ptr->hc[i].dev_addr == addr)) {
-				*pipe_id = i;
-				found = true;
-				break;
-			}
-		}
-	}
-
-	if (!found) {
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
-static inline void uhc_stm32_init_pipes(const struct device *dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
-		priv->busy_pipe[i] = false;
-	}
-}
-
-static inline void uhc_stm32_close_all_pipes(const struct device *dev)
-{
-	const struct uhc_stm32_config *config = dev->config;
-
-	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
-		uhc_stm32_close_pipe(dev, i);
-	}
-}
-
-static inline void uhc_stm32_deinit_pipes(const struct device *dev)
-{
-	return uhc_stm32_close_all_pipes(dev);
 }
 
 static int uhc_stm32_enable(const struct device *dev)
@@ -517,7 +508,7 @@ static int uhc_stm32_enable(const struct device *dev)
 		}
 	}
 
-	uhc_stm32_init_pipes(dev);
+	priv_init_pipes(dev);
 
 	return 0;
 }
@@ -527,7 +518,7 @@ static int uhc_stm32_disable(const struct device *dev)
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
 
-	uhc_stm32_deinit_pipes(dev);
+	priv_deinit_pipes(dev);
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
@@ -582,23 +573,46 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	HAL_HCD_ResetPort(priv->hcd_ptr);
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
+		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
+		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
+
+		__IO uint32_t hprt0_value = 0U;
+
+		hprt0_value = USBx_HPRT0;
+
+		/* avoid interfering with some special bits */
+		hprt0_value &= ~(
+			USB_OTG_HPRT_PENA |
+			USB_OTG_HPRT_PCDET |
+		    USB_OTG_HPRT_PENCHNG |
+			USB_OTG_HPRT_POCCHNG
+		);
+
+		/* set PRST bit */
+		USBx_HPRT0 = (USB_OTG_HPRT_PRST | hprt0_value);
+		k_msleep(100);
+		/* clear PRST bit */
+		USBx_HPRT0 = ((~USB_OTG_HPRT_PRST) & hprt0_value);
+		k_msleep(10);
+	}
+#endif
+
+#if defined(USB_DRD_FS)
+	if (IS_USB_DRD_FS_DEVICE(dev)) {
+		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR |= USB_CNTR_USBRST;
+		k_msleep(100);
+		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR &= ~USB_CNTR_USBRST;
+		k_msleep(30);
+	}
+#endif
 
 	return 0;
 }
 
 static int uhc_stm32_sof_enable(const struct device *dev)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
-
-	if (!READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP) &&
-	    !READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
-		return 0;
-		return -EALREADY;
-	}
-
 	/* TODO */
 	return 0;
 }
@@ -607,13 +621,38 @@ static int uhc_stm32_bus_suspend(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
+		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
+		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
-	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP)) {
-		return -EALREADY;
+		if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP)) {
+			return -EALREADY;
+		}
+
+		__IO uint32_t hprt0_value = 0U;
+
+		hprt0_value = USBx_HPRT0;
+
+		/* avoid interfering with some special bits */
+		hprt0_value &= ~(
+			USB_OTG_HPRT_PENA |
+			USB_OTG_HPRT_PCDET |
+			USB_OTG_HPRT_PENCHNG |
+			USB_OTG_HPRT_POCCHNG
+		);
+
+		/* set PSUP bit */
+		USBx_HPRT0 = (USB_OTG_HPRT_PSUSP | hprt0_value);
 	}
+#endif
 
-	SET_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP);
+#if defined(USB_DRD_FS)
+	if (IS_USB_DRD_FS_DEVICE(dev)) {
+		/* TODO */
+		return -ENOSYS;
+	}
+#endif
 
 	uhc_submit_event(dev, UHC_EVT_SUSPENDED, 0);
 
@@ -622,21 +661,47 @@ static int uhc_stm32_bus_suspend(const struct device *dev)
 
 static int uhc_stm32_bus_resume(const struct device *dev)
 {
-	// TODO : handle WKUPIN into IRQ handler
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
+		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
+		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
-	if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
-		return -EBUSY;
+		if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
+			return -EBUSY;
+		}
+
+		__IO uint32_t hprt0_value = 0U;
+
+		hprt0_value = USBx_HPRT0;
+
+		/* avoid interfering with some special bits */
+		hprt0_value &= ~(
+			USB_OTG_HPRT_PENA |
+			USB_OTG_HPRT_PCDET |
+			USB_OTG_HPRT_PENCHNG |
+			USB_OTG_HPRT_POCCHNG
+		);
+
+		/* set PRES bit */
+		USBx_HPRT0 = (USB_OTG_HPRT_PRES | hprt0_value);
+
+		/* USB specifications says resume must be driven at least 20ms */
+		k_msleep(20 + 1);
+
+		/* clear PRES bit */
+		USBx_HPRT0 = ((~USB_OTG_HPRT_PRES) & hprt0_value);
+		k_msleep(10);
 	}
+#endif
 
-	SET_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES);
-
-	// USB specs says resume must be driven at least 20ms
-	k_msleep(20 + 1);
-
-	CLEAR_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES);
+#if defined(USB_DRD_FS)
+	if (IS_USB_DRD_FS_DEVICE(dev)) {
+		/* TODO */
+		return -ENOSYS;
+	}
+#endif
 
 	uhc_submit_event(dev, UHC_EVT_RESUMED, 0);
 
@@ -776,7 +841,7 @@ static int uhc_stm32_receive_control_status(const struct device *dev, const uint
 static int uhc_stm32_xfer_control(const struct device *dev, struct uhc_transfer *const xfer)
 {
 	uint8_t pipe_id = 0;
-	int err = uhc_stm32_retreive_pipe_id(dev, xfer->ep, xfer->addr, &pipe_id);
+	int err = priv_retreive_pipe_id(dev, xfer->ep, xfer->addr, &pipe_id);
 	if (err) {
 		// No opened pipe found for this endpoint at this device address
 		return err;
@@ -853,7 +918,7 @@ static HCD_URBStateTypeDef uhc_stm32_get_ongoing_xfer_urb_state(const struct dev
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	uint8_t pipe_id = 0;
-	int err = uhc_stm32_retreive_pipe_id(dev,
+	int err = priv_retreive_pipe_id(dev,
 		priv->ongoing_xfer->ep,
 		priv->ongoing_xfer->addr,
 		&pipe_id
@@ -993,7 +1058,7 @@ void priv_on_reset(struct k_work *work)
 		} else if (current_speed == USB_SPEED_HIGH) {
 			pipe_speed = HCD_DEVICE_SPEED_HIGH;
 		}
-		err = uhc_stm32_open_pipe(priv->dev,
+		err = priv_open_pipe(priv->dev,
 			&(priv->control_pipe),
 			0, DEFAULT_ADDR,
 			pipe_speed,
@@ -1017,7 +1082,7 @@ void priv_on_port_disconnect(struct k_work *work)
 
 	// TODO : empty workqueue ?
 
-	uhc_stm32_close_all_pipes(priv->dev);
+	priv_close_all_pipes(priv->dev);
 
 	/* Let higher level code know a disconnection occurred */
 	uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
@@ -1078,7 +1143,7 @@ static const struct uhc_api uhc_stm32_api = {
 	.ep_dequeue = uhc_stm32_ep_dequeue,
 };
 
-static void uhc_stm32_driver_preinit_common(const struct device *dev)
+static void uhc_stm32_driver_init_common(const struct device *dev)
 {
 	struct uhc_data *data = dev->data;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -1110,14 +1175,14 @@ static void uhc_stm32_driver_preinit_common(const struct device *dev)
 	{                                                                                              \
 		struct uhc_stm32_data *priv = uhc_get_private(dev);                                        \
 		                                                                                           \
-		uhc_stm32_driver_preinit_common(dev);                                                      \
+		uhc_stm32_driver_init_common(dev);                                                         \
 		                                                                                           \
 		k_work_queue_start(&priv->work_queue,                                                      \
 		   uhc_work_thread_stack_##node_id,                                                        \
 		   K_THREAD_STACK_SIZEOF(uhc_work_thread_stack_##node_id),                                 \
 		   K_PRIO_COOP(2),                                                                         \
 		   NULL                                                                                    \
-		);                                                                                          \
+		);                                                                                         \
 	                                                                                               \
 		IRQ_CONNECT(DT_IRQN(node_id),                                                              \
 			DT_IRQ(node_id, priority), uhc_stm32_irq,                                              \
@@ -1194,7 +1259,7 @@ static void uhc_stm32_driver_preinit_common(const struct device *dev)
 		.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                 \
 	};                                                                                             \
 	                                                                                               \
-	HCD_HandleTypeDef uhc_stm32_hcd_##node_id = {                                                  \
+	static HCD_HandleTypeDef uhc_stm32_hcd_##node_id = {                                           \
 		.pData = (void*) DEVICE_DT_GET(node_id),                                                   \
 		.Instance = (HCD_TypeDef *) DT_REG_ADDR(node_id),                                          \
 		.Init = {                                                                                  \
