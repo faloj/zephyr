@@ -434,6 +434,297 @@ static inline void priv_deinit_pipes(const struct device *dev)
 	return priv_close_all_pipes(dev);
 }
 
+static inline int priv_submit_request(const struct device *dev, uint8_t chan_num, uint8_t direction,
+									  uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(priv->hcd_ptr,
+		chan_num, direction, ep_type, token, buf, length, 0
+	);
+
+	if (status == HAL_OK) {
+		return 0;
+	} else {
+		return -ECANCELED;
+	}
+}
+
+static inline int priv_send_control_setup(const struct device *dev, const uint8_t chan_num,
+										  uint8_t *buf, uint16_t length)
+{
+	if (length != SETUP_PACKET_SIZE) {
+		return -EINVAL;
+	}
+
+	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
+}
+
+static inline int priv_send_control_status(const struct device *dev, const uint8_t chan_num)
+{
+	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
+}
+
+static int priv_receive_control_status(const struct device *dev, const uint8_t chan_num)
+{
+	return priv_submit_request(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
+}
+
+static int priv_send_data(const struct device *dev, const uint8_t chan_num,
+						  struct net_buf *const buf, const uint8_t ep_type,
+						  const uint8_t maximum_packet_size)
+{
+	size_t tx_size = MIN(buf->len, maximum_packet_size);
+
+	int err = priv_submit_request(dev, chan_num, 0, ep_type, 1, buf->data, tx_size);
+	if (err) {
+		return err;
+	}
+
+	net_buf_pull(buf, tx_size);
+
+	return 0;
+}
+
+static int priv_receive_data(const struct device *dev, const uint8_t chan_num,
+							 struct net_buf *const buf, const uint8_t ep_type,
+							 const uint8_t maximum_packet_size)
+{
+	size_t rx_size = MIN(net_buf_tailroom(buf), maximum_packet_size);
+	if (rx_size == 0) {
+		return -ENOMEM;
+	}
+
+	void* buffer_tail = net_buf_add(buf, rx_size);
+
+	int err = priv_submit_request(dev, chan_num, 1, ep_type, 1, buffer_tail, rx_size);
+	if (err) {
+		net_buf_remove_mem(buf, rx_size);
+		return err;
+	}
+
+	return 0;
+}
+
+static int priv_xfer_control_run(const struct device *dev, struct uhc_transfer *const xfer)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+		LOCAL_LOG_DBG("Handle control SETUP stage");
+		return priv_send_control_setup(dev,
+			priv->ongoing_xfer_pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt)
+		);
+	}
+
+	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
+		if (USB_EP_DIR_IS_IN(xfer->ep)) {
+			LOCAL_LOG_DBG("Handle control DATA stage: receive");
+			return priv_receive_data(dev,
+				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
+			);
+		} else {
+			LOCAL_LOG_DBG("Handle control DATA stage: send");
+			return priv_send_data(dev,
+				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
+			);
+		}
+	}
+
+	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+		if (USB_EP_DIR_IS_IN(xfer->ep)) {
+			LOCAL_LOG_DBG("Handle control STATUS stage: send");
+			return priv_send_control_status(dev, priv->ongoing_xfer_pipe_id);
+		} else {
+			LOCAL_LOG_DBG("Handle STATUS stage: receive");
+			return priv_receive_control_status(dev, priv->ongoing_xfer_pipe_id);
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int priv_xfer_bulk_run(const struct device *dev, struct uhc_transfer *const xfer)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(xfer);
+
+	/* TODO */
+
+	return 0;
+}
+
+static int priv_xfer_run(const struct device * dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_EP) {
+		return priv_xfer_control_run(dev, priv->ongoing_xfer);
+	} else {
+		/* TODO: For now all other xfer are considered as bulk transfers,
+		   add support for all type of transfer
+		 */
+		return priv_xfer_bulk_run(dev, priv->ongoing_xfer);
+	}
+}
+
+static int priv_xfer_start(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	if (priv->ongoing_xfer != NULL) {
+		/* A transfer is already ongoing */
+		return -EBUSY;
+	}
+
+	priv->ongoing_xfer = uhc_xfer_get_next(dev);
+	if (priv->ongoing_xfer == NULL) {
+		LOG_DBG("There is nothing to transfer");
+		return -EAGAIN;
+	}
+
+	priv->ongoing_xfer_attempts = 0;
+
+	/* Note: net_buf API does not offer a proper way to directly save the net_buf state
+	   so it's internal normally hidden net_buf_simple is saved instead
+	*/
+	net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+
+	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
+	int err = priv_retreive_pipe_id(dev,
+		priv->ongoing_xfer->ep,
+		priv->ongoing_xfer->addr,
+		&(priv->ongoing_xfer_pipe_id)
+	);
+
+	if (err) {
+		__ASSERT_NO_MSG(err == -ENODEV);
+		uint8_t ep_type = EP_TYPE_BULK;
+		uint16_t mps = priv->ongoing_xfer->mps;
+		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_EP) {
+			ep_type = EP_TYPE_CTRL;
+			mps = DEFAULT_EP0_MPS;
+		}
+		enum usb_speed speed = priv_get_current_speed(priv->dev);
+		err = priv_open_pipe(priv->dev,
+			&(priv->ongoing_xfer_pipe_id),
+			priv->ongoing_xfer->ep,
+			priv->ongoing_xfer->addr,
+			speed, ep_type, mps
+		);
+		if (err) {
+			return err;
+		}
+	}
+
+	return priv_xfer_run(dev);
+}
+
+static void priv_xfer_end(const struct device *dev, const int err)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	/* Close pipe if it is not the control pipe as it is supposed to stay oppened.
+	   This is temporary as the upper code does not manage pipes yet.
+	 */
+	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) != USB_CONTROL_EP) {
+		int ret = priv_close_pipe(dev, priv->ongoing_xfer_pipe_id);
+		(void) ret;
+		__ASSERT_NO_MSG(ret == 0);
+	}
+
+	uhc_xfer_return(dev, priv->ongoing_xfer, err);
+	priv->ongoing_xfer = NULL;
+
+	/* There may be more xfer to handle, submit a work to handle the next one */
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_new_xfer_work);
+}
+
+static void priv_xfer_control_update_stage(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	/* The last transfer block succeded, reset the failed attempts counter. */
+	priv->ongoing_xfer_attempts = 0;
+
+	if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+		if (priv->ongoing_xfer->buf != NULL) {
+			/* Next state is data stage */
+			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_DATA;
+		} else {
+			/* There is no data so jump directly to the status stage */
+			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+		}
+	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
+		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
+			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
+			 /* No more data left to receive. Go to the status stage */
+			 priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
+				   priv->ongoing_xfer->buf->len == 0) {
+			/* No more data left to send. Go to the status stage */
+			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
+		} else {
+			/* The transmission succeded so far. Save the actual net_buf state in case the
+			   following partial data transmission fails so we can try to send it again. */
+			net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+		}
+	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+		/* Transfer is completed */
+		priv_xfer_end(dev, 0);
+	} else {
+		LOG_DBG("et si…");
+		/* This is not supposed to happen */
+		__ASSERT_NO_MSG(0);
+	}
+}
+
+static int priv_xfer_update(const struct device *dev) {
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	if (priv->ongoing_xfer == NULL) {
+		/* There is no ongoing transfer */
+		return 0;
+	}
+
+	HCD_URBStateTypeDef urb_state =
+		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
+
+	if (urb_state == URB_IDLE) {
+		/* This is not supposed to happen */
+		__ASSERT_NO_MSG(0);
+	}
+
+	if (urb_state == URB_DONE) {
+		LOG_DBG("URB_DONE");
+		priv->ongoing_xfer_attempts = 0;
+		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
+			priv_xfer_control_update_stage(dev);
+		} else {
+			/* Transmission succeded */
+			priv_xfer_end(dev, 0);
+		}
+	} else {
+		LOG_DBG("URB_ERR");
+		/* The transmission failed */
+		priv->ongoing_xfer_attempts++;
+		if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
+			/* Transmission failed too many times, cancel it. */
+			priv_xfer_end(dev, -EPIPE);
+			return 0;
+		}
+		/* Restore net buf to the last state, to be able to re-run the transmission */
+		net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+	}
+
+	if (priv->ongoing_xfer != NULL) {
+		/* Transfer is not completed yet, continue the transmission */
+		priv_xfer_control_run(dev, priv->ongoing_xfer);
+	}
+
+	return 0;
+}
+
 static int uhc_stm32_lock(const struct device *dev)
 {
 	return uhc_lock_internal(dev, K_FOREVER);
@@ -750,296 +1041,23 @@ static int uhc_stm32_ep_dequeue(const struct device *dev, struct uhc_transfer *c
 	return 0;
 }
 
-static inline int priv_submit_request(const struct device *dev, uint8_t chan_num, uint8_t direction,
-									  uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
+static const struct uhc_api uhc_stm32_api = {
+	.lock = uhc_stm32_lock,
+	.unlock = uhc_stm32_unlock,
 
-	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(priv->hcd_ptr,
-		chan_num, direction, ep_type, token, buf, length, 0
-	);
+	.init = uhc_stm32_init,
+	.enable = uhc_stm32_enable,
+	.disable = uhc_stm32_disable,
+	.shutdown = uhc_stm32_shutdown,
 
-	if (status == HAL_OK) {
-		return 0;
-	} else {
-		return -ECANCELED;
-	}
-}
+	.bus_reset = uhc_stm32_bus_reset,
+	.sof_enable = uhc_stm32_sof_enable,
+	.bus_suspend = uhc_stm32_bus_suspend,
+	.bus_resume = uhc_stm32_bus_resume,
 
-static inline int priv_send_control_setup(const struct device *dev, const uint8_t chan_num,
-										  uint8_t *buf, uint16_t length)
-{
-	if (length != SETUP_PACKET_SIZE) {
-		return -EINVAL;
-	}
-
-	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
-}
-
-static inline int priv_send_control_status(const struct device *dev, const uint8_t chan_num)
-{
-	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
-}
-
-static int priv_receive_control_status(const struct device *dev, const uint8_t chan_num)
-{
-	return priv_submit_request(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
-}
-
-static int priv_send_data(const struct device *dev, const uint8_t chan_num,
-						  struct net_buf *const buf, const uint8_t ep_type,
-						  const uint8_t maximum_packet_size)
-{
-	size_t tx_size = MIN(buf->len, maximum_packet_size);
-
-	int err = priv_submit_request(dev, chan_num, 0, ep_type, 1, buf->data, tx_size);
-	if (err) {
-		return err;
-	}
-
-	net_buf_pull(buf, tx_size);
-
-	return 0;
-}
-
-static int priv_receive_data(const struct device *dev, const uint8_t chan_num,
-							 struct net_buf *const buf, const uint8_t ep_type,
-							 const uint8_t maximum_packet_size)
-{
-	size_t rx_size = MIN(net_buf_tailroom(buf), maximum_packet_size);
-	if (rx_size == 0) {
-		return -ENOMEM;
-	}
-
-	void* buffer_tail = net_buf_add(buf, rx_size);
-
-	int err = priv_submit_request(dev, chan_num, 1, ep_type, 1, buffer_tail, rx_size);
-	if (err) {
-		net_buf_remove_mem(buf, rx_size);
-		return err;
-	}
-
-	return 0;
-}
-
-static int priv_xfer_control_run(const struct device *dev, struct uhc_transfer *const xfer)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		LOCAL_LOG_DBG("Handle control SETUP stage");
-		return priv_send_control_setup(dev,
-			priv->ongoing_xfer_pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt)
-		);
-	}
-
-	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
-		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOCAL_LOG_DBG("Handle control DATA stage: receive");
-			return priv_receive_data(dev,
-				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
-			);
-		} else {
-			LOCAL_LOG_DBG("Handle control DATA stage: send");
-			return priv_send_data(dev,
-				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
-			);
-		}
-	}
-
-	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
-		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOCAL_LOG_DBG("Handle control STATUS stage: send");
-			return priv_send_control_status(dev, priv->ongoing_xfer_pipe_id);
-		} else {
-			LOCAL_LOG_DBG("Handle STATUS stage: receive");
-			return priv_receive_control_status(dev, priv->ongoing_xfer_pipe_id);
-		}
-	}
-
-	return -EINVAL;
-}
-
-static int priv_xfer_bulk_run(const struct device *dev, struct uhc_transfer *const xfer)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(xfer);
-
-	/* TODO */
-
-	return 0;
-}
-
-static int priv_xfer_run(const struct device * dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_EP) {
-		return priv_xfer_control_run(dev, priv->ongoing_xfer);
-	} else {
-		/* TODO: For now all other xfer are considered as bulk transfers,
-		   add support for all type of transfer
-		 */
-		return priv_xfer_bulk_run(dev, priv->ongoing_xfer);
-	}
-}
-
-static int priv_xfer_start(const struct device *dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	if (priv->ongoing_xfer != NULL) {
-		/* A transfer is already ongoing */
-		return -EBUSY;
-	}
-
-	priv->ongoing_xfer = uhc_xfer_get_next(dev);
-	if (priv->ongoing_xfer == NULL) {
-		LOG_DBG("There is nothing to transfer");
-		return -EAGAIN;
-	}
-
-	priv->ongoing_xfer_attempts = 0;
-
-	/* Note: net_buf API does not offer a proper way to directly save the net_buf state
-	   so it's internal normally hidden net_buf_simple is saved instead
-	*/
-	net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
-
-	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
-	int err = priv_retreive_pipe_id(dev,
-		priv->ongoing_xfer->ep,
-		priv->ongoing_xfer->addr,
-		&(priv->ongoing_xfer_pipe_id)
-	);
-
-	if (err) {
-		__ASSERT_NO_MSG(err == -ENODEV);
-		uint8_t ep_type = EP_TYPE_BULK;
-		uint16_t mps = priv->ongoing_xfer->mps;
-		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_EP) {
-			ep_type = EP_TYPE_CTRL;
-			mps = DEFAULT_EP0_MPS;
-		}
-		enum usb_speed speed = priv_get_current_speed(priv->dev);
-		err = priv_open_pipe(priv->dev,
-			&(priv->ongoing_xfer_pipe_id),
-			priv->ongoing_xfer->ep,
-			priv->ongoing_xfer->addr,
-			speed, ep_type, mps
-		);
-		if (err) {
-			return err;
-		}
-	}
-
-	return priv_xfer_run(dev);
-}
-
-static void priv_xfer_end(const struct device *dev, const int err)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	/* Close pipe if it is not the control pipe as it is supposed to stay oppened.
-	   This is temporary as the upper code does not manage pipes yet.
-	 */
-	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) != USB_CONTROL_EP) {
-		int ret = priv_close_pipe(dev, priv->ongoing_xfer_pipe_id);
-		(void) ret;
-		__ASSERT_NO_MSG(ret == 0);
-	}
-
-	uhc_xfer_return(dev, priv->ongoing_xfer, err);
-	priv->ongoing_xfer = NULL;
-
-	/* There may be more xfer to handle, submit a work to handle the next one */
-	k_work_submit_to_queue(&priv->work_queue, &priv->on_new_xfer_work);
-}
-
-static void priv_xfer_control_update_stage(const struct device *dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	/* The last transfer block succeded, reset the failed attempts counter. */
-	priv->ongoing_xfer_attempts = 0;
-
-	if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		if (priv->ongoing_xfer->buf != NULL) {
-			/* Next state is data stage */
-			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_DATA;
-		} else {
-			/* There is no data so jump directly to the status stage */
-			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
-		}
-	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
-		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
-			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
-			 /* No more data left to receive. Go to the status stage */
-			 priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
-		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
-				   priv->ongoing_xfer->buf->len == 0) {
-			/* No more data left to send. Go to the status stage */
-			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
-		} else {
-			/* The transmission succeded so far. Save the actual net_buf state in case the
-			   following partial data transmission fails so we can try to send it again. */
-			net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
-		}
-	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
-		/* Transfer is completed */
-		priv_xfer_end(dev, 0);
-	} else {
-		LOG_DBG("et si…");
-		/* This is not supposed to happen */
-		__ASSERT_NO_MSG(0);
-	}
-}
-
-static int priv_xfer_update(const struct device *dev) {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	if (priv->ongoing_xfer == NULL) {
-		/* There is no ongoing transfer */
-		return 0;
-	}
-
-	HCD_URBStateTypeDef urb_state =
-		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
-
-	if (urb_state == URB_IDLE) {
-		/* This is not supposed to happen */
-		__ASSERT_NO_MSG(0);
-	}
-
-	if (urb_state == URB_DONE) {
-		LOG_DBG("URB_DONE");
-		priv->ongoing_xfer_attempts = 0;
-		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
-			priv_xfer_control_update_stage(dev);
-		} else {
-			/* Transmission succeded */
-			priv_xfer_end(dev, 0);
-		}
-	} else {
-		LOG_DBG("URB_ERR");
-		/* The transmission failed */
-		priv->ongoing_xfer_attempts++;
-		if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
-			/* Transmission failed too many times, cancel it. */
-			priv_xfer_end(dev, -EPIPE);
-			return 0;
-		}
-		/* Restore net buf to the last state, to be able to re-run the transmission */
-		net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
-	}
-
-	if (priv->ongoing_xfer != NULL) {
-		/* Transfer is not completed yet, continue the transmission */
-		priv_xfer_control_run(dev, priv->ongoing_xfer);
-	}
-
-	return 0;
-}
+	.ep_enqueue = uhc_stm32_ep_enqueue,
+	.ep_dequeue = uhc_stm32_ep_dequeue,
+};
 
 // TODO : lock when needed
 void priv_on_port_connect(struct k_work *item)
@@ -1167,24 +1185,6 @@ void priv_delayed_reset(struct k_work * work)
 		uhc_stm32_unlock(priv->dev);
 	}
 }
-
-static const struct uhc_api uhc_stm32_api = {
-	.lock = uhc_stm32_lock,
-	.unlock = uhc_stm32_unlock,
-
-	.init = uhc_stm32_init,
-	.enable = uhc_stm32_enable,
-	.disable = uhc_stm32_disable,
-	.shutdown = uhc_stm32_shutdown,
-
-	.bus_reset = uhc_stm32_bus_reset,
-	.sof_enable = uhc_stm32_sof_enable,
-	.bus_suspend = uhc_stm32_bus_suspend,
-	.bus_resume = uhc_stm32_bus_resume,
-
-	.ep_enqueue = uhc_stm32_ep_enqueue,
-	.ep_dequeue = uhc_stm32_ep_dequeue,
-};
 
 static void uhc_stm32_driver_init_common(const struct device *dev)
 {
