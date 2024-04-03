@@ -31,7 +31,6 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 #define SETUP_PACKET_SIZE (8U)
 
-#define DEFAULT_EP0_MPS (64U)
 #define DEFAULT_ADDR    ( 0U)
 #define USB_CONTROL_EP  ( 0U)
 
@@ -600,17 +599,17 @@ static int priv_xfer_start(const struct device *dev)
 	if (err) {
 		__ASSERT_NO_MSG(err == -ENODEV);
 		uint8_t ep_type = EP_TYPE_BULK;
-		uint16_t mps = priv->ongoing_xfer->mps;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_EP) {
+			/* TODO : handle other type of transfers */
 			ep_type = EP_TYPE_CTRL;
-			mps = DEFAULT_EP0_MPS;
 		}
 		enum usb_speed speed = priv_get_current_speed(priv->dev);
 		err = priv_open_pipe(priv->dev,
 			&(priv->ongoing_xfer_pipe_id),
 			priv->ongoing_xfer->ep,
 			priv->ongoing_xfer->addr,
-			speed, ep_type, mps
+			speed, ep_type,
+			priv->ongoing_xfer->mps
 		);
 		if (err) {
 			return err;
@@ -1095,23 +1094,6 @@ void priv_on_reset(struct k_work *work)
 	} else {
 		/* Let higher level code know a reset occurred */
 		uhc_submit_event(priv->dev, UHC_EVT_RESETED, 0);
-	}
-
-	if (priv->state != STM32_UHC_STATE_DISCONNECTED) {
-		int err = 0;
-		// TODO : this open pipe thing is temporary
-		enum usb_speed current_speed = priv_get_current_speed(priv->dev);
-		err = priv_open_pipe(priv->dev,
-			&(priv->control_pipe),
-			0, DEFAULT_ADDR,
-			current_speed,
-			EP_TYPE_CTRL,
-			DEFAULT_EP0_MPS
-		);
-		if (err) {
-			LOG_ERR("Failed to open control pipe out channel");
-			__ASSERT_NO_MSG(0);
-		}
 	}
 }
 
