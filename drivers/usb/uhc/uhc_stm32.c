@@ -167,13 +167,8 @@ static void uhc_stm32_irq(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* The following HAL_HCD_* functions are called from there */
+	/* Call the ST IRQ handler which will, in turn, call the corresponding HAL_HCD_* callbacks */
 	HAL_HCD_IRQHandler(priv->hcd_ptr);
-}
-
-void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
-{
-	ARG_UNUSED(hhcd);
 }
 
 void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
@@ -205,6 +200,11 @@ void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 	ARG_UNUSED(hhcd);
 }
 
+void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
+{
+	ARG_UNUSED(hhcd);
+}
+
 void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 					 HCD_URBStateTypeDef urb_state)
 {
@@ -213,6 +213,7 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 
 	k_work_submit_to_queue(&priv->work_queue, &priv->on_xfer_update_work);
 }
+
 
 static int priv_clock_enable(const struct device *dev)
 {
