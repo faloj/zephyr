@@ -673,7 +673,6 @@ static void priv_xfer_control_update_stage(const struct device *dev)
 		/* Transfer is completed */
 		priv_xfer_end(dev, 0);
 	} else {
-		LOG_DBG("et si…");
 		/* This is not supposed to happen */
 		__ASSERT_NO_MSG(0);
 	}
