@@ -587,7 +587,8 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 			USB_OTG_HPRT_PENA |
 			USB_OTG_HPRT_PCDET |
 		    USB_OTG_HPRT_PENCHNG |
-			USB_OTG_HPRT_POCCHNG
+			USB_OTG_HPRT_POCCHNG |
+			USB_OTG_HPRT_PSUSP
 		);
 
 		/* set PRST bit */
@@ -681,7 +682,8 @@ static int uhc_stm32_bus_resume(const struct device *dev)
 			USB_OTG_HPRT_PENA |
 			USB_OTG_HPRT_PCDET |
 			USB_OTG_HPRT_PENCHNG |
-			USB_OTG_HPRT_POCCHNG
+			USB_OTG_HPRT_POCCHNG |
+			USB_OTG_HPRT_PSUSP
 		);
 
 		/* set PRES bit */
