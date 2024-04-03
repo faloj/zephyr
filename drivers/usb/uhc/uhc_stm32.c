@@ -102,6 +102,7 @@ struct uhc_stm32_data {
 	struct k_work on_connect_work;
 	struct k_work on_disconnect_work;
 	struct k_work on_reset_work;
+	struct k_work on_sof_work;
 	struct k_work on_xfer_update_work;
 	struct k_work on_new_xfer_work;
 	struct k_work_delayable delayed_reset_work;
@@ -202,7 +203,10 @@ void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 
 void HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
 {
-	ARG_UNUSED(hhcd);
+	const struct device *dev = (const struct device *)hhcd->pData;
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_sof_work);
 }
 
 void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
@@ -1075,6 +1079,20 @@ void priv_on_reset(struct k_work *work)
 	}
 }
 
+void priv_on_sof(struct k_work *work)
+{
+    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_sof_work);
+
+	if (priv->ongoing_xfer != NULL) {
+		if (priv->ongoing_xfer > 0) {
+			priv->ongoing_xfer->timeout -= 1;
+		}
+		if (priv->ongoing_xfer->timeout == 0) {
+			uhc_stm32_xfer_end(priv->dev, -ETIMEDOUT);
+		}
+	}
+}
+
 void priv_on_port_disconnect(struct k_work *work)
 {
     struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_disconnect_work);
@@ -1165,6 +1183,7 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	k_work_init(&priv->on_connect_work, priv_on_port_connect);
 	k_work_init(&priv->on_disconnect_work, priv_on_port_disconnect);
 	k_work_init(&priv->on_reset_work, priv_on_reset);
+	k_work_init(&priv->on_sof_work, priv_on_sof);
 	k_work_init(&priv->on_xfer_update_work, priv_on_xfer_update);
 	k_work_init(&priv->on_new_xfer_work, priv_on_new_xfer);
 	k_work_init_delayable(&priv->delayed_reset_work, priv_delayed_reset);
