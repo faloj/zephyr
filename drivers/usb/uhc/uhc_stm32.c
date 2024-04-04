@@ -571,14 +571,14 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 
 	if (priv->ongoing_xfer != NULL) {
 		/* A transfer is already ongoing */
-		return -EBUSY;
+		return 0;
 	}
 
 	priv->ongoing_xfer = uhc_xfer_get_next(dev);
 
 	if (priv->ongoing_xfer == NULL) {
 		/* There is no xfer enqueued */
-		return -EAGAIN;
+		return 0;
 	}
 
 	priv->ongoing_xfer_attempts = 0;
@@ -738,7 +738,7 @@ static int priv_ongoing_xfer_update(const struct device *dev) {
 
 	if (priv->ongoing_xfer != NULL) {
 		/* Transfer is not completed yet, continue the transmission */
-		priv_ongoing_xfer_run(dev);
+		return priv_ongoing_xfer_run(dev);
 	}
 
 	return 0;
@@ -1076,7 +1076,6 @@ static const struct uhc_api uhc_stm32_api = {
 	.ep_dequeue = uhc_stm32_ep_dequeue,
 };
 
-// TODO : lock when needed
 void priv_on_port_connect(struct k_work *item)
 {
     struct uhc_stm32_data *priv = CONTAINER_OF(item, struct uhc_stm32_data, on_connect_work);
@@ -1148,8 +1147,6 @@ void priv_on_port_disconnect(struct k_work *work)
 	/* abort a potentially ongoing transfer */
 	priv_ongoing_xfer_end(priv->dev, -ECANCELED);
 
-	// TODO : empty workqueue ?
-
 	priv_close_all_pipes(priv->dev);
 
 	/* Let higher level code know a disconnection occurred */
@@ -1168,8 +1165,9 @@ void priv_on_xfer_update(struct k_work *work)
 
 	int err = priv_ongoing_xfer_update(priv->dev);
 	if (err) {
-		// TODO
-		LOG_DBG("AARRGGG 3, %d", err);
+		/* something went wrong, cancel the ongoing transfer and notify the upper layer */
+		priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+		uhc_submit_event(priv->dev, UHC_EVT_ERROR, err);
 	}
 
 	uhc_stm32_unlock(priv->dev);
@@ -1192,8 +1190,9 @@ void priv_on_schedule_new_xfer(struct k_work *work)
 
 	int err = priv_ongoing_xfer_start_next(priv->dev);
 	if (err) {
-		// TODO
-		//LOG_DBG("AARRGGG 1, %d", err);
+		/* something went wrong, cancel the ongoing transfer and notify the upper layer */
+		priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+		uhc_submit_event(priv->dev, UHC_EVT_ERROR, err);
 	}
 
 	uhc_stm32_unlock(priv->dev);
