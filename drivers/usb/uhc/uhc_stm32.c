@@ -854,7 +854,7 @@ static int uhc_stm32_disable(const struct device *dev)
 	priv_deinit_pipes(dev);
 
 	if (config->vbus_enable_gpio.port) {
-		err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
+		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
 
 		if (err) {
 			LOG_ERR("Failed to disable vbus power (%d)", err);
