@@ -148,26 +148,6 @@ struct uhc_stm32_config {
 	HCD_SPEED_LOW)))                                   \
 )
 
-
-static inline enum usb_speed priv_get_current_speed(const struct device *dev)
-{
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
-	enum usb_speed speed = SPEED_FROM_HAL_SPEED(
-		HAL_HCD_GetCurrentSpeed(priv->hcd_ptr)
-	);
-
-	if (speed == USB_SPEED_INVALID) {
-		LOG_ERR("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\"");
-		__ASSERT_NO_MSG(0);
-
-		/* Falling back to low speed */
-		speed = USB_SPEED_LOW;
-	}
-
-	return speed;
-}
-
 static void uhc_stm32_irq(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -311,6 +291,25 @@ static int priv_clock_disable(const struct device *dev)
 	}
 
 	return 0;
+}
+
+static enum usb_speed priv_get_current_speed(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	enum usb_speed speed = SPEED_FROM_HAL_SPEED(
+		HAL_HCD_GetCurrentSpeed(priv->hcd_ptr)
+	);
+
+	if (speed == USB_SPEED_INVALID) {
+		LOG_ERR("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\"");
+		__ASSERT_NO_MSG(0);
+
+		/* Falling back to low speed */
+		speed = USB_SPEED_LOW;
+	}
+
+	return speed;
 }
 
 static int priv_pipe_open(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
