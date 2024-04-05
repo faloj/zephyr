@@ -447,7 +447,7 @@ static inline int priv_submit_request(const struct device *dev, uint8_t chan_num
 	}
 }
 
-static inline int priv_send_control_setup(const struct device *dev, const uint8_t chan_num,
+static inline int priv_control_setup_send(const struct device *dev, const uint8_t chan_num,
 										  uint8_t *buf, uint16_t length)
 {
 	if (length != SETUP_PACKET_SIZE) {
@@ -457,12 +457,12 @@ static inline int priv_send_control_setup(const struct device *dev, const uint8_
 	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
 }
 
-static inline int priv_send_control_status(const struct device *dev, const uint8_t chan_num)
+static inline int priv_control_status_send(const struct device *dev, const uint8_t chan_num)
 {
 	return priv_submit_request(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
 }
 
-static int priv_receive_control_status(const struct device *dev, const uint8_t chan_num)
+static int priv_control_status_receive(const struct device *dev, const uint8_t chan_num)
 {
 	return priv_submit_request(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
 }
@@ -509,7 +509,7 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 		LOCAL_LOG_DBG("Handle control SETUP stage");
-		return priv_send_control_setup(dev,
+		return priv_control_setup_send(dev,
 			priv->ongoing_xfer_pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt)
 		);
 	}
@@ -531,10 +531,10 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOCAL_LOG_DBG("Handle control STATUS stage: send");
-			return priv_send_control_status(dev, priv->ongoing_xfer_pipe_id);
+			return priv_control_status_send(dev, priv->ongoing_xfer_pipe_id);
 		} else {
 			LOCAL_LOG_DBG("Handle STATUS stage: receive");
-			return priv_receive_control_status(dev, priv->ongoing_xfer_pipe_id);
+			return priv_control_status_receive(dev, priv->ongoing_xfer_pipe_id);
 		}
 	}
 
