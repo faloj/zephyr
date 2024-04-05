@@ -480,7 +480,7 @@ static void priv_pipe_deinit_all(const struct device *dev)
 }
 
 static int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8_t direction,
-									  uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
+							   uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
@@ -496,7 +496,7 @@ static int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8
 }
 
 static int priv_control_setup_send(const struct device *dev, const uint8_t chan_num,
-										  uint8_t *buf, uint16_t length)
+								   uint8_t *buf, uint16_t length)
 {
 	if (length != USB_SETUP_PACKET_SIZE) {
 		return -EINVAL;
@@ -517,7 +517,7 @@ static int priv_control_status_receive(const struct device *dev, const uint8_t c
 
 static int priv_data_send(const struct device *dev, const uint8_t chan_num,
 						  struct net_buf *const buf, const uint8_t ep_type,
-						  const uint8_t maximum_packet_size)
+						  const uint16_t maximum_packet_size)
 {
 	size_t tx_size = MIN(buf->len, maximum_packet_size);
 
@@ -533,7 +533,7 @@ static int priv_data_send(const struct device *dev, const uint8_t chan_num,
 
 static int priv_data_receive(const struct device *dev, const uint8_t chan_num,
 							 struct net_buf *const buf, const uint8_t ep_type,
-							 const uint8_t maximum_packet_size)
+							 const uint16_t maximum_packet_size)
 {
 	size_t rx_size = MIN(net_buf_tailroom(buf), maximum_packet_size);
 	if (rx_size == 0) {
