@@ -425,12 +425,12 @@ static void priv_pipe_init_all(const struct device *dev)
 	}
 }
 
-static inline void priv_pipe_deinit_all(const struct device *dev)
+static void priv_pipe_deinit_all(const struct device *dev)
 {
 	return priv_pipe_close_all(dev);
 }
 
-static inline int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8_t direction,
+static int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8_t direction,
 									  uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -446,7 +446,7 @@ static inline int priv_request_submit(const struct device *dev, uint8_t chan_num
 	}
 }
 
-static inline int priv_control_setup_send(const struct device *dev, const uint8_t chan_num,
+static int priv_control_setup_send(const struct device *dev, const uint8_t chan_num,
 										  uint8_t *buf, uint16_t length)
 {
 	if (length != SETUP_PACKET_SIZE) {
@@ -456,7 +456,7 @@ static inline int priv_control_setup_send(const struct device *dev, const uint8_
 	return priv_request_submit(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
 }
 
-static inline int priv_control_status_send(const struct device *dev, const uint8_t chan_num)
+static int priv_control_status_send(const struct device *dev, const uint8_t chan_num)
 {
 	return priv_request_submit(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
 }
@@ -659,7 +659,7 @@ static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
 	}
 }
 
-static inline void priv_ongoing_xfer_control_stage_update(const struct device *dev)
+static void priv_ongoing_xfer_control_stage_update(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
