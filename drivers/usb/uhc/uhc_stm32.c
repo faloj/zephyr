@@ -26,9 +26,6 @@ LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
 /* TODO: factorize core init part with udc_stm32 driver if possible */
 
-// TODO : remove
-#define LOCAL_LOG_DBG(msg, ...) LOG_DBG(msg __VA_OPT__(,) __VA_ARGS__)
-
 // TODO: rename ?
 #define DT_CLOCKS_PROP_MAX_LEN (2)
 
@@ -507,7 +504,6 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		LOCAL_LOG_DBG("Handle control SETUP stage");
 		return priv_control_setup_send(dev,
 			priv->ongoing_xfer_pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt)
 		);
@@ -515,12 +511,10 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOCAL_LOG_DBG("Handle control DATA stage: receive");
 			return priv_data_receive(dev,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
 		} else {
-			LOCAL_LOG_DBG("Handle control DATA stage: send");
 			return priv_data_send(dev,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
@@ -529,10 +523,8 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			LOCAL_LOG_DBG("Handle control STATUS stage: send");
 			return priv_control_status_send(dev, priv->ongoing_xfer_pipe_id);
 		} else {
-			LOCAL_LOG_DBG("Handle STATUS stage: receive");
 			return priv_control_status_receive(dev, priv->ongoing_xfer_pipe_id);
 		}
 	}
