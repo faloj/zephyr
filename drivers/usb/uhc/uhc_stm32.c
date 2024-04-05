@@ -706,7 +706,6 @@ static int priv_ongoing_xfer_update(const struct device *dev) {
 	}
 
 	if (urb_state == URB_DONE) {
-		LOG_DBG("URB_DONE");
 		priv->ongoing_xfer_attempts = 0;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
 			priv_ongoing_xfer_control_stage_update(dev);
@@ -715,7 +714,6 @@ static int priv_ongoing_xfer_update(const struct device *dev) {
 			priv_ongoing_xfer_end(dev, 0);
 		}
 	} else {
-		LOG_DBG("URB_ERR");
 		/* The transmission failed */
 		priv->ongoing_xfer_attempts++;
 		if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
@@ -1076,8 +1074,6 @@ void priv_on_port_connect(struct k_work *item)
 
 	uhc_stm32_lock(priv->dev);
 
-	LOG_DBG("Event : Connection");
-
 	/* PHY is high speed capable and connected device may also be so we must
 	   schedule a reset to allow determining the real device speed. */
 	int ret = k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_reset_work, K_MSEC(200));
@@ -1100,13 +1096,10 @@ void priv_on_reset(struct k_work *work)
 		priv->state = STM32_UHC_STATE_READY;
 		enum usb_speed current_speed = priv_get_current_speed(priv->dev);
 		if (current_speed == USB_SPEED_LOW) {
-			LOG_DBG("Low speed device connected");
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_LS, 0);
 		} else if (current_speed == USB_SPEED_FULL) {
-			LOG_DBG("Full speed device connected");
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_FS, 0);
 		} else {
-			LOG_DBG("High speed device connected");
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_HS, 0);
 		}
 	} else {
@@ -1132,8 +1125,6 @@ void priv_on_port_disconnect(struct k_work *work)
 {
     struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_disconnect_work);
 
-	LOG_DBG("Event : Disconnection");
-
 	uhc_stm32_lock(priv->dev);
 
 	priv->state = STM32_UHC_STATE_DISCONNECTED;
@@ -1153,8 +1144,6 @@ void priv_on_xfer_update(struct k_work *work)
 {
     struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_xfer_update_work);
 
-	LOG_DBG("Event : Update");
-
 	uhc_stm32_lock(priv->dev);
 
 	int err = priv_ongoing_xfer_update(priv->dev);
@@ -1171,8 +1160,6 @@ void priv_on_schedule_new_xfer(struct k_work *work)
 {
     struct uhc_stm32_data *priv =
 		CONTAINER_OF(work, struct uhc_stm32_data, on_schedule_new_xfer_work);
-
-	//LOG_DBG("Event : New XFER");
 
 	uhc_stm32_lock(priv->dev);
 
