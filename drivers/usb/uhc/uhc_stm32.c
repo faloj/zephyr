@@ -792,10 +792,13 @@ static int uhc_stm32_init(const struct device *dev)
 	}
 
 #if defined(CONFIG_SOC_SERIES_STM32H7X)
-	/* TODO: useless with an ULPI phy ? */
-	LL_PWR_EnableUSBVoltageDetector();
-	while (LL_PWR_IsActiveFlag_USB() == 0) {
-		;
+	if (config->phy != PHY_EXTERNAL_ULPI) {
+		LL_PWR_EnableUSBVoltageDetector();
+		WAIT_FOR(
+			(LL_PWR_IsActiveFlag_USB() == 0),
+			1000,
+			k_yield()
+		);
 	}
 #endif
 
