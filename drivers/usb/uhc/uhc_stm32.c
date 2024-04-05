@@ -660,7 +660,7 @@ static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
 	}
 }
 
-static inline void priv_ongoing_xfer_control_update_stage(const struct device *dev)
+static inline void priv_ongoing_xfer_control_stage_update(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
@@ -718,7 +718,7 @@ static int priv_ongoing_xfer_update(const struct device *dev) {
 		LOG_DBG("URB_DONE");
 		priv->ongoing_xfer_attempts = 0;
 		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
-			priv_ongoing_xfer_control_update_stage(dev);
+			priv_ongoing_xfer_control_stage_update(dev);
 		} else {
 			/* Transmission succeded */
 			priv_ongoing_xfer_end(dev, 0);
