@@ -313,7 +313,7 @@ static int priv_clock_disable(const struct device *dev)
 	return 0;
 }
 
-static int priv_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
+static int priv_pipe_open(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
 						  uint8_t dev_addr, enum usb_speed speed, uint8_t ep_type, uint16_t mps)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -358,7 +358,7 @@ static int priv_open_pipe(const struct device *dev, uint8_t *pipe_id, uint8_t ep
 	return 0;
 }
 
-static int priv_close_pipe(const struct device *dev, uint8_t pipe_id)
+static int priv_pipe_close(const struct device *dev, uint8_t pipe_id)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
@@ -378,8 +378,8 @@ static int priv_close_pipe(const struct device *dev, uint8_t pipe_id)
 	return 0;
 }
 
-static int priv_retreive_pipe_id(const struct device *dev, const uint8_t ep,
-										const uint8_t addr, uint8_t * const pipe_id)
+static int priv_pipe_retreive_id(const struct device *dev, const uint8_t ep,
+								 const uint8_t addr, uint8_t * const pipe_id)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
@@ -405,7 +405,7 @@ static int priv_retreive_pipe_id(const struct device *dev, const uint8_t ep,
 	return 0;
 }
 
-static void priv_init_pipes(const struct device *dev)
+static void priv_pipe_init_all(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
@@ -416,19 +416,19 @@ static void priv_init_pipes(const struct device *dev)
 	}
 }
 
-static void priv_close_all_pipes(const struct device *dev)
+static void priv_pipe_close_all(const struct device *dev)
 {
 	const struct uhc_stm32_config *config = dev->config;
 
 	size_t i;
 	for(i = 0; i < config->num_host_channels; i++) {
-		priv_close_pipe(dev, i);
+		priv_pipe_close(dev, i);
 	}
 }
 
-static inline void priv_deinit_pipes(const struct device *dev)
+static inline void priv_pipe_deinit_all(const struct device *dev)
 {
-	return priv_close_all_pipes(dev);
+	return priv_pipe_close_all(dev);
 }
 
 static inline int priv_submit_request(const struct device *dev, uint8_t chan_num, uint8_t direction,
@@ -589,7 +589,7 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 	net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 
 	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
-	int err = priv_retreive_pipe_id(dev,
+	int err = priv_pipe_retreive_id(dev,
 		priv->ongoing_xfer->ep,
 		priv->ongoing_xfer->addr,
 		&(priv->ongoing_xfer_pipe_id)
@@ -603,7 +603,7 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 			ep_type = EP_TYPE_CTRL;
 		}
 		enum usb_speed speed = priv_get_current_speed(priv->dev);
-		err = priv_open_pipe(priv->dev,
+		err = priv_pipe_open(priv->dev,
 			&(priv->ongoing_xfer_pipe_id),
 			priv->ongoing_xfer->ep,
 			priv->ongoing_xfer->addr,
@@ -630,7 +630,7 @@ static void priv_ongoing_xfer_end(const struct device *dev, const int err)
 	   This is temporary as the upper code does not manage pipes yet.
 	 */
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) != USB_CONTROL_EP) {
-		int ret = priv_close_pipe(dev, priv->ongoing_xfer_pipe_id);
+		int ret = priv_pipe_close(dev, priv->ongoing_xfer_pipe_id);
 		(void) ret;
 		__ASSERT_NO_MSG(ret == 0);
 	}
@@ -841,7 +841,7 @@ static int uhc_stm32_enable(const struct device *dev)
 		}
 	}
 
-	priv_init_pipes(dev);
+	priv_pipe_init_all(dev);
 
 	return 0;
 }
@@ -854,7 +854,7 @@ static int uhc_stm32_disable(const struct device *dev)
 	/* abort a potentially ongoing transfer */
 	priv_ongoing_xfer_end(priv->dev, -ECANCELED);
 
-	priv_deinit_pipes(dev);
+	priv_pipe_deinit_all(dev);
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
@@ -1150,7 +1150,7 @@ void priv_on_port_disconnect(struct k_work *work)
 	/* abort a potentially ongoing transfer */
 	priv_ongoing_xfer_end(priv->dev, -ECANCELED);
 
-	priv_close_all_pipes(priv->dev);
+	priv_pipe_close_all(priv->dev);
 
 	/* Let higher level code know a disconnection occurred */
 	uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
