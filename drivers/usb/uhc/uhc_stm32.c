@@ -405,6 +405,16 @@ static int priv_pipe_retreive_id(const struct device *dev, const uint8_t ep,
 	return 0;
 }
 
+static void priv_pipe_close_all(const struct device *dev)
+{
+	const struct uhc_stm32_config *config = dev->config;
+
+	size_t i;
+	for(i = 0; i < config->num_host_channels; i++) {
+		priv_pipe_close(dev, i);
+	}
+}
+
 static void priv_pipe_init_all(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
@@ -413,16 +423,6 @@ static void priv_pipe_init_all(const struct device *dev)
 	size_t i;
 	for(i = 0; i < config->num_host_channels; i++) {
 		priv->busy_pipe[i] = false;
-	}
-}
-
-static void priv_pipe_close_all(const struct device *dev)
-{
-	const struct uhc_stm32_config *config = dev->config;
-
-	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
-		priv_pipe_close(dev, i);
 	}
 }
 
