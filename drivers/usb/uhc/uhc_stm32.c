@@ -467,7 +467,7 @@ static int priv_receive_control_status(const struct device *dev, const uint8_t c
 	return priv_submit_request(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
 }
 
-static int priv_send_data(const struct device *dev, const uint8_t chan_num,
+static int priv_data_send(const struct device *dev, const uint8_t chan_num,
 						  struct net_buf *const buf, const uint8_t ep_type,
 						  const uint8_t maximum_packet_size)
 {
@@ -483,7 +483,7 @@ static int priv_send_data(const struct device *dev, const uint8_t chan_num,
 	return 0;
 }
 
-static int priv_receive_data(const struct device *dev, const uint8_t chan_num,
+static int priv_data_receive(const struct device *dev, const uint8_t chan_num,
 							 struct net_buf *const buf, const uint8_t ep_type,
 							 const uint8_t maximum_packet_size)
 {
@@ -517,12 +517,12 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			LOCAL_LOG_DBG("Handle control DATA stage: receive");
-			return priv_receive_data(dev,
+			return priv_data_receive(dev,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
 		} else {
 			LOCAL_LOG_DBG("Handle control DATA stage: send");
-			return priv_send_data(dev,
+			return priv_data_send(dev,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
 		}
