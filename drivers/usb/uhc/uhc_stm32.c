@@ -586,10 +586,17 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 
 static int priv_ongoing_xfer_bulk_run(const struct device *dev, struct uhc_transfer *const xfer)
 {
-	ARG_UNUSED(dev);
-	ARG_UNUSED(xfer);
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* TODO */
+	if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		return priv_data_receive(dev,
+			priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_BULK, xfer->mps
+		);
+	} else {
+		return priv_data_send(dev,
+			priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_BULK, xfer->mps
+		);
+	}
 
 	return 0;
 }
