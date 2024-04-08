@@ -171,6 +171,7 @@ struct uhc_stm32_data {
 	HCD_HandleTypeDef *hcd_ptr;
 	struct uhc_transfer *ongoing_xfer;
 	struct net_buf_simple_state ongoing_xfer_buf_save;
+	struct net_buf_simple_state ongoing_xfer_pristine_buf_save;
 	size_t ongoing_xfer_attempts;
 	uint8_t ongoing_xfer_pipe_id;
 	struct k_work_q work_queue;
@@ -636,6 +637,11 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 	   so it's internal normally hidden net_buf_simple is saved instead
 	*/
 	net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+	memcpy(
+		&(priv->ongoing_xfer_pristine_buf_save),
+		&(priv->ongoing_xfer_buf_save),
+		sizeof(struct net_buf_simple_state)
+	);
 
 	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
 	int err = priv_pipe_retreive_id(dev,
@@ -687,9 +693,6 @@ static void priv_ongoing_xfer_end(const struct device *dev, const int err)
 	uhc_xfer_return(dev, priv->ongoing_xfer, err);
 
 	priv->ongoing_xfer = NULL;
-
-	/* There may be more xfer to handle, submit a work to handle the next one */
-	k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 }
 
 static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
@@ -706,7 +709,35 @@ static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
 
 	if (priv->ongoing_xfer->timeout == 0) {
 		priv_ongoing_xfer_end(priv->dev, -ETIMEDOUT);
+
+		/* There may be more xfer to handle, submit a work to handle the next one */
+		k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 	}
+}
+
+static void priv_ongoing_xfer_update_handle_err(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	/* increase attempt count */
+	priv->ongoing_xfer_attempts++;
+	if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
+		/* transmission failed too many times, cancel it. */
+		priv_ongoing_xfer_end(dev, -EIO);
+		return;
+	}
+
+	/* In case of control transaction, restart from the SETUP stage. This won't have any effect
+	   on any othe transaction type. */
+	priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_SETUP;
+
+	/* restore net buf to it's pristine state, to be able to re-run the whole transmission */
+	memcpy(
+		&(priv->ongoing_xfer_buf_save),
+		&(priv->ongoing_xfer_pristine_buf_save),
+		sizeof(struct net_buf_simple_state)
+	);
+	net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 }
 
 static void priv_ongoing_xfer_control_stage_update(const struct device *dev)
@@ -747,6 +778,112 @@ static void priv_ongoing_xfer_control_stage_update(const struct device *dev)
 	}
 }
 
+static int priv_ongoing_xfer_control_update(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	HCD_URBStateTypeDef urb_state =
+		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
+
+	if (urb_state == URB_DONE) {
+		priv_ongoing_xfer_control_stage_update(dev);
+	} else if (urb_state == URB_ERROR) {
+		priv_ongoing_xfer_update_handle_err(dev);
+	} else if (urb_state == URB_STALL) {
+		if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+			/* something strange occured, this is out of usb specs */
+			priv_ongoing_xfer_end(dev, -EILSEQ);
+		} else {
+			priv_ongoing_xfer_end(dev, -EPIPE);
+		}
+	} else if (urb_state == URB_NYET) {
+		/* something strange occured, this is not supposed to happen */
+		priv_ongoing_xfer_end(dev, -EILSEQ);
+	} else if (urb_state == URB_NOTREADY) {
+		if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
+			priv_ongoing_xfer_update_handle_err(dev);
+		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
+			if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
+				/* Restore net buf to the last state, to be able to re-run the transmission */
+				net_buf_simple_restore(
+					&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
+				);
+			} else {
+				/* nothing to do, retry is done automatically */
+				return 0;
+			}
+		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
+			if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep)) {
+				/* Restore net buf to the last state, to be able to re-run the transmission */
+				net_buf_simple_restore(
+					&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
+				);
+			} else {
+				/* nothing to do, retry is done automatically */
+				return 0;
+			}
+		} else {
+			__ASSERT_NO_MSG(0);
+		}
+	} else { /* URB_IDLE */
+		/* just wait for the next update */
+		return 0;
+	}
+
+	if (priv->ongoing_xfer != NULL) {
+		return priv_ongoing_xfer_run(dev);
+	}
+
+	return 0;
+}
+
+static int priv_ongoing_xfer_bulk_update(const struct device *dev)
+{
+	struct uhc_stm32_data *priv = uhc_get_private(dev);
+
+	HCD_URBStateTypeDef urb_state =
+		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
+
+	if (urb_state == URB_DONE) {
+		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
+			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
+			/* No more data left to receive, transmission succeded */
+			priv_ongoing_xfer_end(dev, 0);
+		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
+				   priv->ongoing_xfer->buf->len == 0) {
+			/* No more data left to send, transmission succeded */
+			priv_ongoing_xfer_end(dev, 0);
+		}
+	} else if (urb_state == URB_ERROR) {
+		priv_ongoing_xfer_update_handle_err(dev);
+	} else if (urb_state == URB_STALL) {
+		priv_ongoing_xfer_end(dev, -EPIPE);
+	} else if (urb_state == URB_NOTREADY) {
+		if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
+			/* Restore net buf to the last state, to be able to re-run this part
+			   of the transmission */
+			net_buf_simple_restore(
+				&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
+			);
+		} else {
+			/* nothing to do, retry is done automatically */
+			return 0;
+		}
+	} else if (urb_state == URB_NYET) {
+		/* FIXME: do something with this if needed */
+		return 0;
+	} else { /* URB_IDLE */
+		/* just wait for the next update */
+	}
+
+	if (priv->ongoing_xfer != NULL) {
+		/* Transfer is not completed yet, continue the transmission */
+		return priv_ongoing_xfer_run(dev);
+	}
+
+	return 0;
+}
+
 static int priv_ongoing_xfer_update(const struct device *dev) {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
@@ -755,37 +892,18 @@ static int priv_ongoing_xfer_update(const struct device *dev) {
 		return 0;
 	}
 
-	HCD_URBStateTypeDef urb_state =
-		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
-
-	if (urb_state == URB_IDLE) {
-		/* This is not supposed to happen */
-		__ASSERT_NO_MSG(0);
-	}
-
-	if (urb_state == URB_DONE) {
-		priv->ongoing_xfer_attempts = 0;
-		if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == 0) {
-			priv_ongoing_xfer_control_stage_update(dev);
-		} else {
-			/* Transmission succeded */
-			priv_ongoing_xfer_end(dev, 0);
-		}
+	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_ENDPOINT) {
+		return priv_ongoing_xfer_control_update(dev);
 	} else {
-		/* The transmission failed */
-		priv->ongoing_xfer_attempts++;
-		if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
-			/* Transmission failed too many times, cancel it. */
-			priv_ongoing_xfer_end(dev, -EPIPE);
-			return 0;
-		}
-		/* Restore net buf to the last state, to be able to re-run the transmission */
-		net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
+		/* TODO: For now all other xfer are considered as bulk transfers,
+		   add support for all type of transfer
+		 */
+		return priv_ongoing_xfer_bulk_update(dev);
 	}
 
-	if (priv->ongoing_xfer != NULL) {
-		/* Transfer is not completed yet, continue the transmission */
-		return priv_ongoing_xfer_run(dev);
+	if (priv->ongoing_xfer == NULL) {
+		/* There may be more xfer to handle, submit a work to handle the next one */
+		k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 	}
 
 	return 0;
