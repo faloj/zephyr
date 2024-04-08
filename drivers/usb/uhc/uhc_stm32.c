@@ -168,7 +168,6 @@ struct uhc_stm32_data {
 	enum uhc_state state;
 	const struct device * dev;
 	bool busy_pipe[UHC_STM32_NB_MAX_PIPE];
-	uint8_t control_pipe;
 	HCD_HandleTypeDef *hcd_ptr;
 	struct uhc_transfer *ongoing_xfer;
 	struct net_buf_simple_state ongoing_xfer_buf_save;
