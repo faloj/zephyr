@@ -252,9 +252,9 @@ void HAL_HCD_HC_NotifyURBChange_Callback(HCD_HandleTypeDef *hhcd, uint8_t chnum,
 }
 
 
-static int priv_clock_enable(const struct device *dev)
+static int priv_clock_enable(struct uhc_stm32_data *const priv)
 {
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 	const struct device *const clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
 
 	if (!device_is_ready(clk)) {
@@ -300,7 +300,7 @@ static int priv_clock_enable(const struct device *dev)
 
 
 #if defined(CONFIG_SOC_SERIES_STM32H7X)
-	if(IS_USB_OTG_HS_DEVICE(dev)) {
+	if(IS_USB_OTG_HS_DEVICE(priv->dev)) {
 		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
 		if (config->phy == PHY_EXTERNAL_ULPI) {
 			LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
@@ -313,7 +313,7 @@ static int priv_clock_enable(const struct device *dev)
 		}
 	}
 #if defined(USB_OTG_FS)
-	if (IS_USB_OTG_FS_DEVICE(dev)) {
+	if (IS_USB_OTG_FS_DEVICE(priv->dev)) {
 		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB2OTGHS);
 		/* USB_OTG_FS cannot be connected to an external ULPI PHY but
 		   ULPI clock is still activated by default in sleep mode
@@ -329,9 +329,9 @@ static int priv_clock_enable(const struct device *dev)
 	return 0;
 }
 
-static int priv_clock_disable(const struct device *dev)
+static int priv_clock_disable(struct uhc_stm32_data *const priv)
 {
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
 
 	if (clock_control_off(clk, (clock_control_subsys_t *)&config->clocks[0]) != 0) {
@@ -342,10 +342,8 @@ static int priv_clock_disable(const struct device *dev)
 	return 0;
 }
 
-static enum usb_speed priv_get_current_speed(const struct device *dev)
+static enum usb_speed priv_get_current_speed(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	enum usb_speed speed = SPEED_FROM_HAL_SPEED(
 		HAL_HCD_GetCurrentSpeed(priv->hcd_ptr)
 	);
@@ -361,11 +359,10 @@ static enum usb_speed priv_get_current_speed(const struct device *dev)
 	return speed;
 }
 
-static int priv_pipe_open(const struct device *dev, uint8_t *pipe_id, uint8_t ep,
+static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, uint8_t ep,
 						  uint8_t dev_addr, enum usb_speed speed, uint8_t ep_type, uint16_t mps)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 
 	uint8_t pipe_speed = HCD_DEVICE_SPEED_LOW;
 	if (speed == USB_SPEED_LOW) {
@@ -406,10 +403,9 @@ static int priv_pipe_open(const struct device *dev, uint8_t *pipe_id, uint8_t ep
 	return 0;
 }
 
-static int priv_pipe_close(const struct device *dev, uint8_t pipe_id)
+static int priv_pipe_close(struct uhc_stm32_data *const priv, uint8_t pipe_id)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 
 	if (pipe_id > config->num_host_channels) {
 		return -EINVAL;
@@ -426,11 +422,10 @@ static int priv_pipe_close(const struct device *dev, uint8_t pipe_id)
 	return 0;
 }
 
-static int priv_pipe_retreive_id(const struct device *dev, const uint8_t ep,
+static int priv_pipe_retreive_id(struct uhc_stm32_data *const priv, const uint8_t ep,
 								 const uint8_t addr, uint8_t * const pipe_id)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 
 	bool found = false;
 
@@ -453,20 +448,19 @@ static int priv_pipe_retreive_id(const struct device *dev, const uint8_t ep,
 	return 0;
 }
 
-static void priv_pipe_close_all(const struct device *dev)
+static void priv_pipe_close_all(struct uhc_stm32_data *const priv)
 {
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 
 	size_t i;
 	for(i = 0; i < config->num_host_channels; i++) {
-		priv_pipe_close(dev, i);
+		priv_pipe_close(priv, i);
 	}
 }
 
-static void priv_pipe_init_all(const struct device *dev)
+static void priv_pipe_init_all(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
+	const struct uhc_stm32_config *config = priv->dev->config;
 
 	size_t i;
 	for(i = 0; i < config->num_host_channels; i++) {
@@ -474,16 +468,15 @@ static void priv_pipe_init_all(const struct device *dev)
 	}
 }
 
-static void priv_pipe_deinit_all(const struct device *dev)
+static void priv_pipe_deinit_all(struct uhc_stm32_data *const priv)
 {
-	return priv_pipe_close_all(dev);
+	return priv_pipe_close_all(priv);
 }
 
-static int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8_t direction,
-							   uint8_t ep_type, uint8_t token, uint8_t *buf, uint16_t length)
+static int priv_request_submit(struct uhc_stm32_data *const priv, uint8_t chan_num,
+							   uint8_t direction, uint8_t ep_type, uint8_t token,
+							   uint8_t *buf, uint16_t length)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	HAL_StatusTypeDef status = HAL_HCD_HC_SubmitRequest(priv->hcd_ptr,
 		chan_num, direction, ep_type, token, buf, length, 0
 	);
@@ -495,33 +488,33 @@ static int priv_request_submit(const struct device *dev, uint8_t chan_num, uint8
 	}
 }
 
-static int priv_control_setup_send(const struct device *dev, const uint8_t chan_num,
+static int priv_control_setup_send(struct uhc_stm32_data *const priv, const uint8_t chan_num,
 								   uint8_t *buf, uint16_t length)
 {
 	if (length != USB_SETUP_PACKET_SIZE) {
 		return -EINVAL;
 	}
 
-	return priv_request_submit(dev, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
+	return priv_request_submit(priv, chan_num, 0, EP_TYPE_CTRL, 0, buf, length);
 }
 
-static int priv_control_status_send(const struct device *dev, const uint8_t chan_num)
+static int priv_control_status_send(struct uhc_stm32_data *const priv, const uint8_t chan_num)
 {
-	return priv_request_submit(dev, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
+	return priv_request_submit(priv, chan_num, 0, EP_TYPE_CTRL, 1, NULL, 0);
 }
 
-static int priv_control_status_receive(const struct device *dev, const uint8_t chan_num)
+static int priv_control_status_receive(struct uhc_stm32_data *const priv, const uint8_t chan_num)
 {
-	return priv_request_submit(dev, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
+	return priv_request_submit(priv, chan_num, 1, EP_TYPE_CTRL, 1, NULL, 0);
 }
 
-static int priv_data_send(const struct device *dev, const uint8_t chan_num,
+static int priv_data_send(struct uhc_stm32_data *const priv, const uint8_t chan_num,
 						  struct net_buf *const buf, const uint8_t ep_type,
 						  const uint16_t maximum_packet_size)
 {
 	size_t tx_size = MIN(buf->len, maximum_packet_size);
 
-	int err = priv_request_submit(dev, chan_num, 0, ep_type, 1, buf->data, tx_size);
+	int err = priv_request_submit(priv, chan_num, 0, ep_type, 1, buf->data, tx_size);
 	if (err) {
 		return err;
 	}
@@ -531,7 +524,7 @@ static int priv_data_send(const struct device *dev, const uint8_t chan_num,
 	return 0;
 }
 
-static int priv_data_receive(const struct device *dev, const uint8_t chan_num,
+static int priv_data_receive(struct uhc_stm32_data *const priv, const uint8_t chan_num,
 							 struct net_buf *const buf, const uint8_t ep_type,
 							 const uint16_t maximum_packet_size)
 {
@@ -542,7 +535,7 @@ static int priv_data_receive(const struct device *dev, const uint8_t chan_num,
 
 	void* buffer_tail = net_buf_add(buf, rx_size);
 
-	int err = priv_request_submit(dev, chan_num, 1, ep_type, 1, buffer_tail, rx_size);
+	int err = priv_request_submit(priv, chan_num, 1, ep_type, 1, buffer_tail, rx_size);
 	if (err) {
 		net_buf_remove_mem(buf, rx_size);
 		return err;
@@ -551,23 +544,22 @@ static int priv_data_receive(const struct device *dev, const uint8_t chan_num,
 	return 0;
 }
 
-static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_transfer *const xfer)
+static int priv_ongoing_xfer_control_run(struct uhc_stm32_data *const priv,
+										 struct uhc_transfer *const xfer)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-		return priv_control_setup_send(dev,
+		return priv_control_setup_send(priv,
 			priv->ongoing_xfer_pipe_id, xfer->setup_pkt, sizeof(xfer->setup_pkt)
 		);
 	}
 
 	if (xfer->buf != NULL && xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			return priv_data_receive(dev,
+			return priv_data_receive(priv,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
 		} else {
-			return priv_data_send(dev,
+			return priv_data_send(priv,
 				priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_CONTROL, xfer->mps
 			);
 		}
@@ -575,25 +567,24 @@ static int priv_ongoing_xfer_control_run(const struct device *dev, struct uhc_tr
 
 	if (xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			return priv_control_status_send(dev, priv->ongoing_xfer_pipe_id);
+			return priv_control_status_send(priv, priv->ongoing_xfer_pipe_id);
 		} else {
-			return priv_control_status_receive(dev, priv->ongoing_xfer_pipe_id);
+			return priv_control_status_receive(priv, priv->ongoing_xfer_pipe_id);
 		}
 	}
 
 	return -EINVAL;
 }
 
-static int priv_ongoing_xfer_bulk_run(const struct device *dev, struct uhc_transfer *const xfer)
+static int priv_ongoing_xfer_bulk_run(struct uhc_stm32_data *const priv,
+									  struct uhc_transfer *const xfer)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (USB_EP_DIR_IS_IN(xfer->ep)) {
-		return priv_data_receive(dev,
+		return priv_data_receive(priv,
 			priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_BULK, xfer->mps
 		);
 	} else {
-		return priv_data_send(dev,
+		return priv_data_send(priv,
 			priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_BULK, xfer->mps
 		);
 	}
@@ -601,30 +592,26 @@ static int priv_ongoing_xfer_bulk_run(const struct device *dev, struct uhc_trans
 	return 0;
 }
 
-static int priv_ongoing_xfer_run(const struct device * dev)
+static int priv_ongoing_xfer_run(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_ENDPOINT) {
-		return priv_ongoing_xfer_control_run(dev, priv->ongoing_xfer);
+		return priv_ongoing_xfer_control_run(priv, priv->ongoing_xfer);
 	} else {
 		/* TODO: For now all other xfer are considered as bulk transfers,
 		   add support for all type of transfer
 		 */
-		return priv_ongoing_xfer_bulk_run(dev, priv->ongoing_xfer);
+		return priv_ongoing_xfer_bulk_run(priv, priv->ongoing_xfer);
 	}
 }
 
-static int priv_ongoing_xfer_start_next(const struct device *dev)
+static int priv_ongoing_xfer_start_next(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (priv->ongoing_xfer != NULL) {
 		/* A transfer is already ongoing */
 		return 0;
 	}
 
-	priv->ongoing_xfer = uhc_xfer_get_next(dev);
+	priv->ongoing_xfer = uhc_xfer_get_next(priv->dev);
 
 	if (priv->ongoing_xfer == NULL) {
 		/* There is no xfer enqueued */
@@ -644,7 +631,7 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 	);
 
 	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
-	int err = priv_pipe_retreive_id(dev,
+	int err = priv_pipe_retreive_id(priv,
 		priv->ongoing_xfer->ep,
 		priv->ongoing_xfer->addr,
 		&(priv->ongoing_xfer_pipe_id)
@@ -657,8 +644,8 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 			/* TODO : handle other type of transfers */
 			ep_type = EP_TYPE_CTRL;
 		}
-		enum usb_speed speed = priv_get_current_speed(priv->dev);
-		err = priv_pipe_open(priv->dev,
+		enum usb_speed speed = priv_get_current_speed(priv);
+		err = priv_pipe_open(priv,
 			&(priv->ongoing_xfer_pipe_id),
 			priv->ongoing_xfer->ep,
 			priv->ongoing_xfer->addr,
@@ -670,13 +657,11 @@ static int priv_ongoing_xfer_start_next(const struct device *dev)
 		}
 	}
 
-	return priv_ongoing_xfer_run(dev);
+	return priv_ongoing_xfer_run(priv);
 }
 
-static void priv_ongoing_xfer_end(const struct device *dev, const int err)
+static void priv_ongoing_xfer_end(struct uhc_stm32_data *const priv, const int err)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (priv->ongoing_xfer == NULL) {
 		return;
 	}
@@ -685,20 +670,18 @@ static void priv_ongoing_xfer_end(const struct device *dev, const int err)
 	   This is temporary as the upper code does not manage pipes yet.
 	 */
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) != USB_CONTROL_ENDPOINT) {
-		int ret = priv_pipe_close(dev, priv->ongoing_xfer_pipe_id);
+		int ret = priv_pipe_close(priv, priv->ongoing_xfer_pipe_id);
 		(void) ret;
 		__ASSERT_NO_MSG(ret == 0);
 	}
 
-	uhc_xfer_return(dev, priv->ongoing_xfer, err);
+	uhc_xfer_return(priv->dev, priv->ongoing_xfer, err);
 
 	priv->ongoing_xfer = NULL;
 }
 
-static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
+static void priv_ongoing_xfer_handle_timeout(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	if (priv->ongoing_xfer == NULL) {
 		return;
 	}
@@ -708,22 +691,20 @@ static void priv_ongoing_xfer_handle_timeout(const struct device *dev)
 	}
 
 	if (priv->ongoing_xfer->timeout == 0) {
-		priv_ongoing_xfer_end(priv->dev, -ETIMEDOUT);
+		priv_ongoing_xfer_end(priv, -ETIMEDOUT);
 
 		/* There may be more xfer to handle, submit a work to handle the next one */
 		k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 	}
 }
 
-static void priv_ongoing_xfer_update_handle_err(const struct device *dev)
+static void priv_ongoing_xfer_update_handle_err(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	/* increase attempt count */
 	priv->ongoing_xfer_attempts++;
 	if (priv->ongoing_xfer_attempts >= USB_NB_MAX_XFER_ATTEMPTS) {
 		/* transmission failed too many times, cancel it. */
-		priv_ongoing_xfer_end(dev, -EIO);
+		priv_ongoing_xfer_end(priv, -EIO);
 		return;
 	}
 
@@ -740,10 +721,8 @@ static void priv_ongoing_xfer_update_handle_err(const struct device *dev)
 	net_buf_simple_restore(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 }
 
-static void priv_ongoing_xfer_control_stage_update(const struct device *dev)
+static void priv_ongoing_xfer_control_stage_update(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	/* The last transfer block succeded, reset the failed attempts counter. */
 	priv->ongoing_xfer_attempts = 0;
 
@@ -771,37 +750,35 @@ static void priv_ongoing_xfer_control_stage_update(const struct device *dev)
 		}
 	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 		/* Transfer is completed */
-		priv_ongoing_xfer_end(dev, 0);
+		priv_ongoing_xfer_end(priv, 0);
 	} else {
 		/* This is not supposed to happen */
 		__ASSERT_NO_MSG(0);
 	}
 }
 
-static int priv_ongoing_xfer_control_update(const struct device *dev)
+static int priv_ongoing_xfer_control_update(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	HCD_URBStateTypeDef urb_state =
 		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
 
 	if (urb_state == URB_DONE) {
-		priv_ongoing_xfer_control_stage_update(dev);
+		priv_ongoing_xfer_control_stage_update(priv);
 	} else if (urb_state == URB_ERROR) {
-		priv_ongoing_xfer_update_handle_err(dev);
+		priv_ongoing_xfer_update_handle_err(priv);
 	} else if (urb_state == URB_STALL) {
 		if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 			/* something strange occured, this is out of usb specs */
-			priv_ongoing_xfer_end(dev, -EILSEQ);
+			priv_ongoing_xfer_end(priv, -EILSEQ);
 		} else {
-			priv_ongoing_xfer_end(dev, -EPIPE);
+			priv_ongoing_xfer_end(priv, -EPIPE);
 		}
 	} else if (urb_state == URB_NYET) {
 		/* something strange occured, this is not supposed to happen */
-		priv_ongoing_xfer_end(dev, -EILSEQ);
+		priv_ongoing_xfer_end(priv, -EILSEQ);
 	} else if (urb_state == URB_NOTREADY) {
 		if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
-			priv_ongoing_xfer_update_handle_err(dev);
+			priv_ongoing_xfer_update_handle_err(priv);
 		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
 			if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
 				/* Restore net buf to the last state, to be able to re-run the transmission */
@@ -831,33 +808,31 @@ static int priv_ongoing_xfer_control_update(const struct device *dev)
 	}
 
 	if (priv->ongoing_xfer != NULL) {
-		return priv_ongoing_xfer_run(dev);
+		return priv_ongoing_xfer_run(priv);
 	}
 
 	return 0;
 }
 
-static int priv_ongoing_xfer_bulk_update(const struct device *dev)
+static int priv_ongoing_xfer_bulk_update(struct uhc_stm32_data *const priv)
 {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
 	HCD_URBStateTypeDef urb_state =
 		HAL_HCD_HC_GetURBState(priv->hcd_ptr, priv->ongoing_xfer_pipe_id);
 
 	if (urb_state == URB_DONE) {
 		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
 			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
-			/* No more data left to receive, transmission succeded */
-			priv_ongoing_xfer_end(dev, 0);
+			/* No more data left to receive, transmission succeeded */
+			priv_ongoing_xfer_end(priv, 0);
 		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
 				   priv->ongoing_xfer->buf->len == 0) {
-			/* No more data left to send, transmission succeded */
-			priv_ongoing_xfer_end(dev, 0);
+			/* No more data left to send, transmission succeeded */
+			priv_ongoing_xfer_end(priv, 0);
 		}
 	} else if (urb_state == URB_ERROR) {
-		priv_ongoing_xfer_update_handle_err(dev);
+		priv_ongoing_xfer_update_handle_err(priv);
 	} else if (urb_state == URB_STALL) {
-		priv_ongoing_xfer_end(dev, -EPIPE);
+		priv_ongoing_xfer_end(priv, -EPIPE);
 	} else if (urb_state == URB_NOTREADY) {
 		if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
 			/* Restore net buf to the last state, to be able to re-run this part
@@ -878,27 +853,26 @@ static int priv_ongoing_xfer_bulk_update(const struct device *dev)
 
 	if (priv->ongoing_xfer != NULL) {
 		/* Transfer is not completed yet, continue the transmission */
-		return priv_ongoing_xfer_run(dev);
+		return priv_ongoing_xfer_run(priv);
 	}
 
 	return 0;
 }
 
-static int priv_ongoing_xfer_update(const struct device *dev) {
-	struct uhc_stm32_data *priv = uhc_get_private(dev);
-
+static int priv_ongoing_xfer_update(struct uhc_stm32_data *const priv)
+{
 	if (priv->ongoing_xfer == NULL) {
 		/* There is no ongoing transfer */
 		return 0;
 	}
 
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) == USB_CONTROL_ENDPOINT) {
-		return priv_ongoing_xfer_control_update(dev);
+		return priv_ongoing_xfer_control_update(priv);
 	} else {
 		/* TODO: For now all other xfer are considered as bulk transfers,
 		   add support for all type of transfer
 		 */
-		return priv_ongoing_xfer_bulk_update(dev);
+		return priv_ongoing_xfer_bulk_update(priv);
 	}
 
 	if (priv->ongoing_xfer == NULL) {
@@ -967,7 +941,7 @@ static int uhc_stm32_init(const struct device *dev)
 	}
 #endif
 
-	err = priv_clock_enable(dev);
+	err = priv_clock_enable(priv);
 	if (err != 0) {
 		LOG_ERR("Error enabling clock(s)");
 		return -EIO;
@@ -1006,7 +980,7 @@ static int uhc_stm32_enable(const struct device *dev)
 		}
 	}
 
-	priv_pipe_init_all(dev);
+	priv_pipe_init_all(priv);
 
 	return 0;
 }
@@ -1017,9 +991,9 @@ static int uhc_stm32_disable(const struct device *dev)
 	const struct uhc_stm32_config *config = dev->config;
 
 	/* abort a potentially ongoing transfer */
-	priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+	priv_ongoing_xfer_end(priv, -ECANCELED);
 
-	priv_pipe_deinit_all(dev);
+	priv_pipe_deinit_all(priv);
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
@@ -1053,7 +1027,7 @@ static int uhc_stm32_shutdown(const struct device *dev)
 		return -EIO;
 	}
 
-	int err = priv_clock_disable(dev);
+	int err = priv_clock_disable(priv);
 
 	if (err) {
 		LOG_ERR("Failed to disable USB clock (%d)", err);
@@ -1270,7 +1244,7 @@ void priv_on_reset(struct k_work *work)
 
 	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
 		priv->state = STM32_UHC_STATE_READY;
-		enum usb_speed current_speed = priv_get_current_speed(priv->dev);
+		enum usb_speed current_speed = priv_get_current_speed(priv);
 		if (current_speed == USB_SPEED_LOW) {
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_LS, 0);
 		} else if (current_speed == USB_SPEED_FULL) {
@@ -1292,7 +1266,7 @@ void priv_on_sof(struct k_work *work)
 
 	uhc_stm32_lock(priv->dev);
 
-	priv_ongoing_xfer_handle_timeout(priv->dev);
+	priv_ongoing_xfer_handle_timeout(priv);
 
 	uhc_stm32_unlock(priv->dev);
 }
@@ -1306,9 +1280,9 @@ void priv_on_port_disconnect(struct k_work *work)
 	priv->state = STM32_UHC_STATE_DISCONNECTED;
 
 	/* abort a potentially ongoing transfer */
-	priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+	priv_ongoing_xfer_end(priv, -ECANCELED);
 
-	priv_pipe_close_all(priv->dev);
+	priv_pipe_close_all(priv);
 
 	/* Let higher level code know a disconnection occurred */
 	uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
@@ -1322,10 +1296,10 @@ void priv_on_xfer_update(struct k_work *work)
 
 	uhc_stm32_lock(priv->dev);
 
-	int err = priv_ongoing_xfer_update(priv->dev);
+	int err = priv_ongoing_xfer_update(priv);
 	if (err) {
 		/* something went wrong, cancel the ongoing transfer and notify the upper layer */
-		priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+		priv_ongoing_xfer_end(priv, -ECANCELED);
 		uhc_submit_event(priv->dev, UHC_EVT_ERROR, err);
 	}
 
@@ -1345,10 +1319,10 @@ void priv_on_schedule_new_xfer(struct k_work *work)
 		return;
 	}
 
-	int err = priv_ongoing_xfer_start_next(priv->dev);
+	int err = priv_ongoing_xfer_start_next(priv);
 	if (err) {
 		/* something went wrong, cancel the ongoing transfer and notify the upper layer */
-		priv_ongoing_xfer_end(priv->dev, -ECANCELED);
+		priv_ongoing_xfer_end(priv, -ECANCELED);
 		uhc_submit_event(priv->dev, UHC_EVT_ERROR, err);
 	}
 
