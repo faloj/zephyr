@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2024 Syslinbit
- * Copyright (c) 2023 Linaro Limited
  *
  * SPDX-License-Identifier: Apache-2.0
  */
