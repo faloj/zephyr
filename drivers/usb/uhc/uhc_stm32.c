@@ -167,6 +167,7 @@ enum uhc_state {
 struct uhc_stm32_data {
 	enum uhc_state state;
 	const struct device * dev;
+	size_t num_host_channels;
 	bool busy_pipe[UHC_STM32_NB_MAX_PIPE];
 	HCD_HandleTypeDef *hcd_ptr;
 	struct uhc_transfer *ongoing_xfer;
@@ -187,7 +188,6 @@ struct uhc_stm32_data {
 struct uhc_stm32_config {
 	uint32_t irq;
 	enum phy_interface phy;
-	size_t num_host_channels;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	size_t num_clock;
 	const struct pinctrl_dev_config *pcfg;
@@ -361,8 +361,6 @@ static enum usb_speed priv_get_current_speed(struct uhc_stm32_data *const priv)
 static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, uint8_t ep,
 						  uint8_t dev_addr, enum usb_speed speed, uint8_t ep_type, uint16_t mps)
 {
-	const struct uhc_stm32_config *config = priv->dev->config;
-
 	uint8_t pipe_speed = HCD_DEVICE_SPEED_LOW;
 	if (speed == USB_SPEED_LOW) {
 		pipe_speed = HCD_DEVICE_SPEED_LOW;
@@ -377,7 +375,7 @@ static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, u
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
+	for(i = 0; i < priv->num_host_channels; i++) {
 		if (priv->busy_pipe[i] == false) {
 			*pipe_id = i;
 			found = true;
@@ -404,9 +402,7 @@ static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, u
 
 static int priv_pipe_close(struct uhc_stm32_data *const priv, uint8_t pipe_id)
 {
-	const struct uhc_stm32_config *config = priv->dev->config;
-
-	if (pipe_id > config->num_host_channels) {
+	if (pipe_id > priv->num_host_channels) {
 		return -EINVAL;
 	}
 
@@ -424,12 +420,10 @@ static int priv_pipe_close(struct uhc_stm32_data *const priv, uint8_t pipe_id)
 static int priv_pipe_retreive_id(struct uhc_stm32_data *const priv, const uint8_t ep,
 								 const uint8_t addr, uint8_t * const pipe_id)
 {
-	const struct uhc_stm32_config *config = priv->dev->config;
-
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
+	for(i = 0; i < priv->num_host_channels; i++) {
 		if (priv->busy_pipe[i] == true) {
 			if ((priv->hcd_ptr->hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
 				(priv->hcd_ptr->hc[i].dev_addr == addr)) {
@@ -449,20 +443,16 @@ static int priv_pipe_retreive_id(struct uhc_stm32_data *const priv, const uint8_
 
 static void priv_pipe_close_all(struct uhc_stm32_data *const priv)
 {
-	const struct uhc_stm32_config *config = priv->dev->config;
-
 	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
+	for(i = 0; i < priv->num_host_channels; i++) {
 		priv_pipe_close(priv, i);
 	}
 }
 
 static void priv_pipe_init_all(struct uhc_stm32_data *const priv)
 {
-	const struct uhc_stm32_config *config = priv->dev->config;
-
 	size_t i;
-	for(i = 0; i < config->num_host_channels; i++) {
+	for(i = 0; i < priv->num_host_channels; i++) {
 		priv->busy_pipe[i] = false;
 	}
 }
@@ -1404,7 +1394,6 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 		.vbus_enable_gpio = GPIO_DT_SPEC_GET_OR(node_id, vbus_gpios, {0}),                         \
 		.clocks = STM32_DT_CLOCKS(node_id),                                                        \
 		.num_clock = DT_NUM_CLOCKS(node_id),                                                       \
-		.num_host_channels = DT_PROP(node_id, num_host_channels),                                  \
 		.phy = DT_PHY_INTERFACE_TYPE(node_id),                                                     \
 		.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                 \
 	};                                                                                             \
@@ -1427,6 +1416,7 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	                                                                                               \
 	static struct uhc_stm32_data uhc_priv_data_##node_id = {                                       \
 		.hcd_ptr = &(uhc_stm32_hcd_##node_id),                                                     \
+		.num_host_channels = DT_PROP(node_id, num_host_channels),                                  \
 	};                                                                                             \
 	                                                                                               \
 	static struct uhc_data uhc_data_##node_id = {                                                  \
