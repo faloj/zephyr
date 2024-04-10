@@ -566,8 +566,6 @@ static int priv_ongoing_xfer_bulk_run(struct uhc_stm32_data *const priv,
 			priv->ongoing_xfer_pipe_id, xfer->buf, USB_EP_TYPE_BULK, xfer->mps
 		);
 	}
-
-	return 0;
 }
 
 static int priv_ongoing_xfer_run(struct uhc_stm32_data *const priv)
