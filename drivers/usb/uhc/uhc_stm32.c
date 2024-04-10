@@ -1347,15 +1347,7 @@ void priv_delayed_reset(struct k_work * work)
 
 static void uhc_stm32_driver_init_common(const struct device *dev)
 {
-	struct uhc_data *data = dev->data;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
-	const struct uhc_stm32_config *config = dev->config;
-
-	if (config->max_speed >= USB_SPEED_HIGH) {
-		data->caps.hs = 1;
-	} else {
-		data->caps.hs = 0;
-	}
 
 	priv->dev = dev;
 	priv->state = STM32_UHC_STATE_DISCONNECTED;
@@ -1441,6 +1433,9 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	                                                                                               \
 	static struct uhc_data uhc_data_##node_id = {                                                  \
 		.mutex = Z_MUTEX_INITIALIZER(uhc_data_##node_id.mutex),                                    \
+		.caps = {                                                                                  \
+			.hs = ((DT_MAX_SPEED(node_id) >= USB_SPEED_HIGH) ? 1 : 0),                             \
+		},                                                                                         \
 		.priv = &uhc_priv_data_##node_id,                                                          \
 	};                                                                                             \
 	                                                                                               \
