@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "uhc_common.h"
-
-#include <zephyr/drivers/pinctrl.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/clock_control/stm32_clock_control.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
 #include <zephyr/irq.h>
+#include <zephyr/net/buf.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pinctrl.h>
+#include <zephyr/drivers/clock_control/stm32_clock_control.h>
+#include <zephyr/drivers/usb/uhc.h>
 
 #include <soc.h>
 #include <stm32_ll_bus.h>
@@ -19,6 +21,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+
+#include "uhc_common.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
