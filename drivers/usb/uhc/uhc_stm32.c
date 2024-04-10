@@ -1328,6 +1328,11 @@ void priv_on_sof(struct k_work *work)
 
 	uhc_stm32_lock(priv->dev);
 
+	if (priv->state != STM32_UHC_STATE_READY) {
+		uhc_stm32_unlock(priv->dev);
+		return;
+	}
+
 	priv_ongoing_xfer_handle_timeout(priv);
 
 	uhc_stm32_unlock(priv->dev);
@@ -1338,6 +1343,11 @@ void priv_on_xfer_update(struct k_work *work)
     struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_xfer_update_work);
 
 	uhc_stm32_lock(priv->dev);
+
+	if (priv->state != STM32_UHC_STATE_READY) {
+		uhc_stm32_unlock(priv->dev);
+		return;
+	}
 
 	int err = priv_ongoing_xfer_update(priv);
 	if (err) {
@@ -1357,7 +1367,6 @@ void priv_on_schedule_new_xfer(struct k_work *work)
 	uhc_stm32_lock(priv->dev);
 
 	if (priv->state != STM32_UHC_STATE_READY) {
-		/* There is no device connected (or speed enumeration is ongoing) */
 		uhc_stm32_unlock(priv->dev);
 		return;
 	}
@@ -1380,10 +1389,13 @@ void priv_delayed_enumeration_reset(struct k_work * work)
 
 	uhc_stm32_lock(priv->dev);
 
-	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
-		/* Note: This function takes time and will delay other submited work */
-		priv_bus_reset(priv);
+	if (priv->state != STM32_UHC_STATE_SPEED_ENUM) {
+		uhc_stm32_unlock(priv->dev);
+		return;
 	}
+
+	/* Note: This function takes time and will delay other submited work */
+	priv_bus_reset(priv);
 
 	uhc_stm32_unlock(priv->dev);
 }
