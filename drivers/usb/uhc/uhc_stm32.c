@@ -27,7 +27,6 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(uhc_stm32, CONFIG_UHC_DRIVER_LOG_LEVEL);
 
-/* TODO: factorize core init part with udc_stm32 driver if possible */
 
 #define DT_COMPAT_STM32_USB   st_stm32_usb
 #define DT_COMPAT_STM32_OTGFS st_stm32_otgfs
