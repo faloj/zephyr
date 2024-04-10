@@ -451,11 +451,6 @@ static void priv_pipe_init_all(struct uhc_stm32_data *const priv)
 	}
 }
 
-static void priv_pipe_deinit_all(struct uhc_stm32_data *const priv)
-{
-	return priv_pipe_close_all(priv);
-}
-
 static int priv_request_submit(struct uhc_stm32_data *const priv, uint8_t chan_num,
 							   uint8_t direction, uint8_t ep_type, uint8_t token,
 							   uint8_t *buf, uint16_t length)
@@ -991,6 +986,8 @@ static int uhc_stm32_init(const struct device *dev)
 		return -EIO;
 	}
 
+	priv_pipe_init_all(priv);
+
 	return 0;
 }
 
@@ -1017,8 +1014,6 @@ static int uhc_stm32_enable(const struct device *dev)
 		}
 	}
 
-	priv_pipe_init_all(priv);
-
 	return 0;
 }
 
@@ -1026,8 +1021,6 @@ static int uhc_stm32_disable(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
-
-	priv_pipe_deinit_all(priv); // TODO : remove
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
