@@ -867,6 +867,60 @@ static int priv_ongoing_xfer_update(struct uhc_stm32_data *const priv)
 	return 0;
 }
 
+static void priv_bus_reset(struct uhc_stm32_data *const priv)
+{
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	if (IS_USB_OTG_FS_DEVICE(priv->dev) || IS_USB_OTG_HS_DEVICE(priv->dev)) {
+		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
+		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
+
+		__IO uint32_t hprt0_value = 0U;
+
+		hprt0_value = USBx_HPRT0;
+
+		/* avoid interfering with some special bits */
+		hprt0_value &= ~(
+			USB_OTG_HPRT_PENA |
+			USB_OTG_HPRT_PCDET |
+		    USB_OTG_HPRT_PENCHNG |
+			USB_OTG_HPRT_POCCHNG |
+			USB_OTG_HPRT_PSUSP
+		);
+
+		/* set PRST bit */
+		USBx_HPRT0 = (USB_OTG_HPRT_PRST | hprt0_value);
+		k_msleep(100);
+		/* clear PRST bit */
+		USBx_HPRT0 = ((~USB_OTG_HPRT_PRST) & hprt0_value);
+		k_msleep(10);
+	}
+#endif
+
+#if defined(USB_DRD_FS)
+	if (IS_USB_DRD_FS_DEVICE(priv->dev)) {
+		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR |= USB_CNTR_USBRST;
+		k_msleep(100);
+		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR &= ~USB_CNTR_USBRST;
+		k_msleep(30);
+	}
+#endif
+}
+
+static void priv_clear(struct uhc_stm32_data *const priv)
+{
+	/* abort a potentially ongoing transfer */
+	priv_ongoing_xfer_end(priv, -ECANCELED);
+
+	/* cancel any pontential pending work */
+	k_work_cancel_delayable(&priv->delayed_enum_reset_work);
+	k_work_cancel(&priv->on_reset_work);
+	k_work_cancel(&priv->on_sof_work);
+	k_work_cancel(&priv->on_xfer_update_work);
+	k_work_cancel(&priv->on_schedule_new_xfer_work);
+
+	priv_pipe_close_all(priv);
+}
+
 static int uhc_stm32_lock(const struct device *dev)
 {
 	return uhc_lock_internal(dev, K_FOREVER);
@@ -974,10 +1028,7 @@ static int uhc_stm32_disable(const struct device *dev)
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 	const struct uhc_stm32_config *config = dev->config;
 
-	/* abort a potentially ongoing transfer */
-	priv_ongoing_xfer_end(priv, -ECANCELED);
-
-	priv_pipe_deinit_all(priv);
+	priv_pipe_deinit_all(priv); // TODO : remove
 
 	if (config->vbus_enable_gpio.port) {
 		int err = gpio_pin_set_dt(&config->vbus_enable_gpio, 0);
@@ -996,6 +1047,16 @@ static int uhc_stm32_disable(const struct device *dev)
 	}
 
 	irq_disable(config->irq);
+
+	/* clear out everything */
+	priv_clear(priv);
+
+	if (priv->state == STM32_UHC_STATE_READY) {
+		/* Let higher level code know the device is not reachable anymore */
+		uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
+	}
+
+	priv->state = STM32_UHC_STATE_DISCONNECTED;
 
 	return 0;
 }
@@ -1025,41 +1086,16 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
-	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
-		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
-		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
-
-		__IO uint32_t hprt0_value = 0U;
-
-		hprt0_value = USBx_HPRT0;
-
-		/* avoid interfering with some special bits */
-		hprt0_value &= ~(
-			USB_OTG_HPRT_PENA |
-			USB_OTG_HPRT_PCDET |
-		    USB_OTG_HPRT_PENCHNG |
-			USB_OTG_HPRT_POCCHNG |
-			USB_OTG_HPRT_PSUSP
-		);
-
-		/* set PRST bit */
-		USBx_HPRT0 = (USB_OTG_HPRT_PRST | hprt0_value);
-		k_msleep(100);
-		/* clear PRST bit */
-		USBx_HPRT0 = ((~USB_OTG_HPRT_PRST) & hprt0_value);
-		k_msleep(10);
+	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
+		/* a reset is already planned */
+		return -EBUSY;
 	}
-#endif
 
-#if defined(USB_DRD_FS)
-	if (IS_USB_DRD_FS_DEVICE(dev)) {
-		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR |= USB_CNTR_USBRST;
-		k_msleep(100);
-		((USB_DRD_TypeDef *) priv->hcd_ptr->Instance)->CNTR &= ~USB_CNTR_USBRST;
-		k_msleep(30);
-	}
-#endif
+	/* clear everything */
+	priv_clear(priv);
+
+	/* perform a reset */
+	priv_bus_reset(priv);
 
 	return 0;
 }
@@ -1233,31 +1269,24 @@ void priv_on_port_connect_disconnect(struct k_work *work)
 
 	if (connected) {
 		if (priv->state == STM32_UHC_STATE_READY) {
-			/* a spurious disconnection occured */
-
-			/* clean evrything */
-			priv_ongoing_xfer_end(priv, -ECANCELED);
-			priv_pipe_close_all(priv);
-
-			/* Let higher level code know a disconnection occurred */
+			/* a spurious disconnection occured, cancel ongoing transfer and clear pending works,
+			   and let higher level code know a disconnection occurred */
+			priv_clear(priv);
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
 		}
 
+		/* launch a (re)enumeration. */
 		priv->state = STM32_UHC_STATE_SPEED_ENUM;
-
-		/* PHY is high speed capable and connected device may also be so we must
-		   schedule a reset to allow determining the real device speed. */
 		k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_enum_reset_work, K_MSEC(200));
 	} else {
 		if (priv->state == STM32_UHC_STATE_READY) {
-			/* abort a potentially ongoing transfer */
-			priv_ongoing_xfer_end(priv, -ECANCELED);
-			priv_pipe_close_all(priv);
+			/* cancel ongoing transfer and clear pending works */
+			priv_clear(priv);
 
-			/* Let higher level code know a disconnection occurred */
+			/* let higher level code know a disconnection occurred */
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
 		} else if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
-			/* cancel potentially pending enumeration reset */
+			/* cancel the pending enumeration reset */
 			k_work_cancel_delayable(&priv->delayed_enum_reset_work);
 		} else {
 			/* a spurious connection occured, nothing to do */
@@ -1353,7 +1382,7 @@ void priv_delayed_enumeration_reset(struct k_work * work)
 
 	if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
 		/* Note: This function takes time and will delay other submited work */
-		uhc_stm32_bus_reset(priv->dev);
+		priv_bus_reset(priv);
 	}
 
 	uhc_stm32_unlock(priv->dev);
