@@ -176,13 +176,12 @@ struct uhc_stm32_data {
 	size_t ongoing_xfer_attempts;
 	uint8_t ongoing_xfer_pipe_id;
 	struct k_work_q work_queue;
-	struct k_work on_connect_work;
-	struct k_work on_disconnect_work;
+	struct k_work on_connect_disconnect_work;
 	struct k_work on_reset_work;
 	struct k_work on_sof_work;
 	struct k_work on_xfer_update_work;
 	struct k_work on_schedule_new_xfer_work;
-	struct k_work_delayable delayed_reset_work;
+	struct k_work_delayable delayed_enum_reset_work;
 };
 
 struct uhc_stm32_config {
@@ -209,7 +208,7 @@ void HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	k_work_submit_to_queue(&priv->work_queue, &priv->on_connect_work);
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_connect_disconnect_work);
 }
 
 void HAL_HCD_Disconnect_Callback(HCD_HandleTypeDef *hhcd)
@@ -217,7 +216,7 @@ void HAL_HCD_Disconnect_Callback(HCD_HandleTypeDef *hhcd)
 	const struct device *dev = (const struct device *)hhcd->pData;
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	k_work_submit_to_queue(&priv->work_queue, &priv->on_disconnect_work);
+	k_work_submit_to_queue(&priv->work_queue, &priv->on_connect_disconnect_work);
 }
 
 void HAL_HCD_PortEnabled_Callback(HCD_HandleTypeDef *hhcd)
@@ -1207,20 +1206,69 @@ static const struct uhc_api uhc_stm32_api = {
 	.ep_dequeue = uhc_stm32_ep_dequeue,
 };
 
-void priv_on_port_connect(struct k_work *item)
+void priv_on_port_connect_disconnect(struct k_work *work)
 {
-    struct uhc_stm32_data *priv = CONTAINER_OF(item, struct uhc_stm32_data, on_connect_work);
+    struct uhc_stm32_data *priv =
+		CONTAINER_OF(work, struct uhc_stm32_data, on_connect_disconnect_work);
 
 	uhc_stm32_lock(priv->dev);
 
-	/* PHY is high speed capable and connected device may also be so we must
-	   schedule a reset to allow determining the real device speed. */
-	int ret = k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_reset_work, K_MSEC(200));
-	if (ret != 1) {
-		__ASSERT_NO_MSG(0);
-	}
+	bool connected = false;
 
-	priv->state = STM32_UHC_STATE_SPEED_ENUM;
+#if defined(USB_OTG_FS) || defined(USB_OTG_HS)
+	if (IS_USB_OTG_FS_DEVICE(priv->dev) || IS_USB_OTG_HS_DEVICE(priv->dev)) {
+		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
+		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
+
+		if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PCSTS)) {
+			connected = true;
+		} else {
+			connected = false;
+		}
+	}
+#endif
+
+#if defined(USB_DRD_FS)
+	if (IS_USB_DRD_FS_DEVICE(priv->dev)) {
+		/* TODO */
+		return;
+	}
+#endif
+
+	if (connected) {
+		if (priv->state == STM32_UHC_STATE_READY) {
+			/* a spurious disconnection occured */
+
+			/* clean evrything */
+			priv_ongoing_xfer_end(priv, -ECANCELED);
+			priv_pipe_close_all(priv);
+
+			/* Let higher level code know a disconnection occurred */
+			uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
+		}
+
+		priv->state = STM32_UHC_STATE_SPEED_ENUM;
+
+		/* PHY is high speed capable and connected device may also be so we must
+		   schedule a reset to allow determining the real device speed. */
+		k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_enum_reset_work, K_MSEC(200));
+	} else {
+		if (priv->state == STM32_UHC_STATE_READY) {
+			/* abort a potentially ongoing transfer */
+			priv_ongoing_xfer_end(priv, -ECANCELED);
+			priv_pipe_close_all(priv);
+
+			/* Let higher level code know a disconnection occurred */
+			uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
+		} else if (priv->state == STM32_UHC_STATE_SPEED_ENUM) {
+			/* cancel potentially pending enumeration reset */
+			k_work_cancel_delayable(&priv->delayed_enum_reset_work);
+		} else {
+			/* a spurious connection occured, nothing to do */
+		}
+
+		priv->state = STM32_UHC_STATE_DISCONNECTED;
+	}
 
 	uhc_stm32_unlock(priv->dev);
 }
@@ -1256,25 +1304,6 @@ void priv_on_sof(struct k_work *work)
 	uhc_stm32_lock(priv->dev);
 
 	priv_ongoing_xfer_handle_timeout(priv);
-
-	uhc_stm32_unlock(priv->dev);
-}
-
-void priv_on_port_disconnect(struct k_work *work)
-{
-    struct uhc_stm32_data *priv = CONTAINER_OF(work, struct uhc_stm32_data, on_disconnect_work);
-
-	uhc_stm32_lock(priv->dev);
-
-	priv->state = STM32_UHC_STATE_DISCONNECTED;
-
-	/* abort a potentially ongoing transfer */
-	priv_ongoing_xfer_end(priv, -ECANCELED);
-
-	priv_pipe_close_all(priv);
-
-	/* Let higher level code know a disconnection occurred */
-	uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
 
 	uhc_stm32_unlock(priv->dev);
 }
@@ -1318,11 +1347,11 @@ void priv_on_schedule_new_xfer(struct k_work *work)
 	uhc_stm32_unlock(priv->dev);
 }
 
-void priv_delayed_reset(struct k_work * work)
+void priv_delayed_enumeration_reset(struct k_work * work)
 {
 	struct k_work_delayable *delayable_work = k_work_delayable_from_work(work);
 	struct uhc_stm32_data *priv =
-		CONTAINER_OF(delayable_work, struct uhc_stm32_data, delayed_reset_work);
+		CONTAINER_OF(delayable_work, struct uhc_stm32_data, delayed_enum_reset_work);
 
 	uhc_stm32_lock(priv->dev);
 
@@ -1341,13 +1370,12 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	priv->state = STM32_UHC_STATE_DISCONNECTED;
 
 	k_work_queue_init(&priv->work_queue);
-	k_work_init(&priv->on_connect_work, priv_on_port_connect);
-	k_work_init(&priv->on_disconnect_work, priv_on_port_disconnect);
+	k_work_init(&priv->on_connect_disconnect_work, priv_on_port_connect_disconnect);
 	k_work_init(&priv->on_reset_work, priv_on_reset);
 	k_work_init(&priv->on_sof_work, priv_on_sof);
 	k_work_init(&priv->on_xfer_update_work, priv_on_xfer_update);
 	k_work_init(&priv->on_schedule_new_xfer_work, priv_on_schedule_new_xfer);
-	k_work_init_delayable(&priv->delayed_reset_work, priv_delayed_reset);
+	k_work_init_delayable(&priv->delayed_enum_reset_work, priv_delayed_enumeration_reset);
 }
 
 
