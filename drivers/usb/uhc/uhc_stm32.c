@@ -190,7 +190,6 @@ struct uhc_stm32_config {
 	size_t num_host_channels;
 	struct stm32_pclken clocks[DT_CLOCKS_PROP_MAX_LEN];
 	size_t num_clock;
-	enum usb_speed max_speed;
 	const struct pinctrl_dev_config *pcfg;
 	struct gpio_dt_spec ulpi_reset_gpio;
 	struct gpio_dt_spec vbus_enable_gpio;
@@ -1407,7 +1406,6 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 		.num_clock = DT_NUM_CLOCKS(node_id),                                                       \
 		.num_host_channels = DT_PROP(node_id, num_host_channels),                                  \
 		.phy = DT_PHY_INTERFACE_TYPE(node_id),                                                     \
-		.max_speed = DT_MAX_SPEED(node_id),                                                        \
 		.ulpi_reset_gpio = GPIO_DT_SPEC_GET_OR(DT_PHY(node_id), reset_gpios, {0}),                 \
 	};                                                                                             \
 	                                                                                               \
