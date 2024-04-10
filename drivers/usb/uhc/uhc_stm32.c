@@ -255,50 +255,42 @@ static int priv_clock_enable(struct uhc_stm32_data *const priv)
 	const struct uhc_stm32_config *config = priv->dev->config;
 	const struct device *const clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
 
+	int err = 0;
+
 	if (!device_is_ready(clk)) {
 		LOG_ERR("clock control device not ready");
 		return -ENODEV;
 	}
 
 	if (config->num_clock > 1) {
-		if (clock_control_configure(clk, (clock_control_subsys_t *)&config->clocks[1],
-					    NULL) != 0) {
+		err = clock_control_configure(clk, (clock_control_subsys_t *)&config->clocks[1], NULL);
+		if (err) {
 			LOG_ERR("Could not select USB domain clock");
 			return -EIO;
 		}
 	}
 
-	if (clock_control_on(clk, (clock_control_subsys_t *)&config->clocks[0]) != 0) {
+	err = clock_control_on(clk, (clock_control_subsys_t *)&config->clocks[0]);
+	if (err) {
 		LOG_ERR("Unable to enable USB clock");
 		return -EIO;
 	}
 
-	uint32_t usb_clock_rate;
+	uint32_t clock_freq;
 
-	if (clock_control_get_rate(clk, (clock_control_subsys_t *)&config->clocks[1],
-				   &usb_clock_rate) != 0) {
-		LOG_ERR("Failed to get USB domain clock rate");
+	err = clock_control_get_rate(clk, (clock_control_subsys_t *)&config->clocks[1], &clock_freq);
+	if (err) {
+		LOG_ERR("Failed to get USB domain clock frequency");
 		return -EIO;
 	}
 
-	if (usb_clock_rate != MHZ(48)) {
-		LOG_ERR("USB Clock is not 48MHz (%d)", usb_clock_rate);
+	if (clock_freq != MHZ(48)) {
+		LOG_ERR("USB Clock is not 48MHz (%d)", clock_freq);
 		return -ENOTSUP;
 	}
 
-/* Previous check won't work in case of F1. Add build time check */
-#if defined(RCC_CFGR_OTGFSPRE) || defined(RCC_CFGR_USBPRE)
-
-#if (MHZ(48) == CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) && !defined(STM32_PLL_USBPRE)
-/* PLL output clock is set to 48MHz, it should not be divided */
-#warning USBPRE/OTGFSPRE should be set in rcc node
-#endif
-
-#endif /* RCC_CFGR_OTGFSPRE / RCC_CFGR_USBPRE */
-
-
 #if defined(CONFIG_SOC_SERIES_STM32H7X)
-	if(IS_USB_OTG_HS_DEVICE(priv->dev)) {
+	if (IS_USB_OTG_HS_DEVICE(priv->dev)) {
 		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
 		if (config->phy == PHY_EXTERNAL_ULPI) {
 			LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
@@ -332,7 +324,8 @@ static int priv_clock_disable(struct uhc_stm32_data *const priv)
 	const struct uhc_stm32_config *config = priv->dev->config;
 	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
 
-	if (clock_control_off(clk, (clock_control_subsys_t *)&config->clocks[0]) != 0) {
+	int err = clock_control_off(clk, (clock_control_subsys_t *)&config->clocks[0]);
+	if (err) {
 		LOG_ERR("Unable to disable USB clock");
 		return -EIO;
 	}
