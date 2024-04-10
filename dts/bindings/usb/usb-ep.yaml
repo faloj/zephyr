@@ -25,8 +25,3 @@ properties:
     description: |
       Number of OUT endpoints supported by hardware
       (including EP0 OUT)
-
-  num-host-channels:
-    type: int
-    description: |
-      Number of host channels supported by hardware
