@@ -1338,7 +1338,6 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	priv->dev = dev;
 	priv->state = STM32_UHC_STATE_DISCONNECTED;
 
 	k_work_queue_init(&priv->work_queue);
@@ -1417,6 +1416,7 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	static struct uhc_stm32_data uhc_priv_data_##node_id = {                                       \
 		.hcd_ptr = &(uhc_stm32_hcd_##node_id),                                                     \
 		.num_bidir_pipes = DT_PROP(node_id, num_host_channels),                                    \
+		.dev = DEVICE_DT_GET(node_id),                                                             \
 	};                                                                                             \
 	                                                                                               \
 	static struct uhc_data uhc_data_##node_id = {                                                  \
