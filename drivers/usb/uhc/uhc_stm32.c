@@ -167,7 +167,7 @@ enum uhc_state {
 struct uhc_stm32_data {
 	enum uhc_state state;
 	const struct device * dev;
-	size_t num_host_channels;
+	size_t num_bidir_pipes;
 	bool busy_pipe[UHC_STM32_NB_MAX_PIPE];
 	HCD_HandleTypeDef *hcd_ptr;
 	struct uhc_transfer *ongoing_xfer;
@@ -375,7 +375,7 @@ static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, u
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < priv->num_host_channels; i++) {
+	for(i = 0; i < priv->num_bidir_pipes; i++) {
 		if (priv->busy_pipe[i] == false) {
 			*pipe_id = i;
 			found = true;
@@ -402,7 +402,7 @@ static int priv_pipe_open(struct uhc_stm32_data *const priv, uint8_t *pipe_id, u
 
 static int priv_pipe_close(struct uhc_stm32_data *const priv, uint8_t pipe_id)
 {
-	if (pipe_id > priv->num_host_channels) {
+	if (pipe_id > priv->num_bidir_pipes) {
 		return -EINVAL;
 	}
 
@@ -423,7 +423,7 @@ static int priv_pipe_retreive_id(struct uhc_stm32_data *const priv, const uint8_
 	bool found = false;
 
 	size_t i;
-	for(i = 0; i < priv->num_host_channels; i++) {
+	for(i = 0; i < priv->num_bidir_pipes; i++) {
 		if (priv->busy_pipe[i] == true) {
 			if ((priv->hcd_ptr->hc[i].ep_num == USB_EP_GET_IDX(ep)) &&
 				(priv->hcd_ptr->hc[i].dev_addr == addr)) {
@@ -444,7 +444,7 @@ static int priv_pipe_retreive_id(struct uhc_stm32_data *const priv, const uint8_
 static void priv_pipe_close_all(struct uhc_stm32_data *const priv)
 {
 	size_t i;
-	for(i = 0; i < priv->num_host_channels; i++) {
+	for(i = 0; i < priv->num_bidir_pipes; i++) {
 		priv_pipe_close(priv, i);
 	}
 }
@@ -452,7 +452,7 @@ static void priv_pipe_close_all(struct uhc_stm32_data *const priv)
 static void priv_pipe_init_all(struct uhc_stm32_data *const priv)
 {
 	size_t i;
-	for(i = 0; i < priv->num_host_channels; i++) {
+	for(i = 0; i < priv->num_bidir_pipes; i++) {
 		priv->busy_pipe[i] = false;
 	}
 }
@@ -1416,7 +1416,7 @@ static void uhc_stm32_driver_init_common(const struct device *dev)
 	                                                                                               \
 	static struct uhc_stm32_data uhc_priv_data_##node_id = {                                       \
 		.hcd_ptr = &(uhc_stm32_hcd_##node_id),                                                     \
-		.num_host_channels = DT_PROP(node_id, num_host_channels),                                  \
+		.num_bidir_pipes = DT_PROP(node_id, num_host_channels),                                    \
 	};                                                                                             \
 	                                                                                               \
 	static struct uhc_data uhc_data_##node_id = {                                                  \
