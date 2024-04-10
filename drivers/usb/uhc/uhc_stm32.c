@@ -1108,7 +1108,7 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 
 static int uhc_stm32_sof_enable(const struct device *dev)
 {
-	/* TODO */
+	/* Nothing to do */
 	return 0;
 }
 
