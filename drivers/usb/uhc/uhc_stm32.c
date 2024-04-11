@@ -1115,16 +1115,20 @@ static int uhc_stm32_bus_suspend(const struct device *dev)
 
 #if defined(USB_OTG_FS) || defined(USB_OTG_HS)
 	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
+		const struct uhc_stm32_config *config = priv->dev->config;
+		if (config->phy == PHY_EXTERNAL_ULPI) {
+			/* TODO */
+			return -ENOSYS;
+		}
+
 		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
 		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
-		if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PSUSP)) {
+		__IO uint32_t hprt0_value = USBx_HPRT0;
+
+		if (hprt0_value & USB_OTG_HPRT_PSUSP) {
 			return -EALREADY;
 		}
-
-		__IO uint32_t hprt0_value = 0U;
-
-		hprt0_value = USBx_HPRT0;
 
 		/* avoid interfering with some special bits */
 		hprt0_value &= ~(
@@ -1134,8 +1138,11 @@ static int uhc_stm32_bus_suspend(const struct device *dev)
 			USB_OTG_HPRT_POCCHNG
 		);
 
-		/* set PSUP bit */
+		/* set suspend bit bit */
 		USBx_HPRT0 = (USB_OTG_HPRT_PSUSP | hprt0_value);
+
+		/* stop PHY clock */
+		USBx_PCGCCTL |= USB_OTG_PCGCR_STPPCLK;
 	}
 #endif
 
@@ -1157,18 +1164,25 @@ static int uhc_stm32_bus_resume(const struct device *dev)
 
 #if defined(USB_OTG_FS) || defined(USB_OTG_HS)
 	if (IS_USB_OTG_FS_DEVICE(dev) || IS_USB_OTG_HS_DEVICE(dev)) {
+		const struct uhc_stm32_config *config = priv->dev->config;
+		if (config->phy == PHY_EXTERNAL_ULPI) {
+			/* TODO */
+			return -ENOSYS;
+		}
+
 		/* define USBx_BASE as USBx_HPRT0 is a special ST defined macro that depends on it */
 		uint32_t USBx_BASE = (uint32_t)priv->hcd_ptr->Instance;
 
-		if (READ_BIT(USBx_HPRT0, USB_OTG_HPRT_PRES)) {
+		__IO uint32_t hprt0_value = USBx_HPRT0;
+
+		if (hprt0_value & USB_OTG_HPRT_PRES) {
 			return -EBUSY;
 		}
 
-		__IO uint32_t hprt0_value = 0U;
+		/* restart PHY clock */
+		USBx_PCGCCTL &= ~USB_OTG_PCGCR_STPPCLK;
 
-		hprt0_value = USBx_HPRT0;
-
-		/* avoid interfering with some special bits */
+		/* avoid interfering with some special HPRT bits and clear the suspend bit */
 		hprt0_value &= ~(
 			USB_OTG_HPRT_PENA |
 			USB_OTG_HPRT_PCDET |
@@ -1177,13 +1191,13 @@ static int uhc_stm32_bus_resume(const struct device *dev)
 			USB_OTG_HPRT_PSUSP
 		);
 
-		/* set PRES bit */
+		/* set resume bit */
 		USBx_HPRT0 = (USB_OTG_HPRT_PRES | hprt0_value);
 
 		/* USB specifications says resume must be driven at least 20ms */
 		k_msleep(20 + 1);
 
-		/* clear PRES bit */
+		/* clear resume bit */
 		USBx_HPRT0 = ((~USB_OTG_HPRT_PRES) & hprt0_value);
 		k_msleep(10);
 	}
