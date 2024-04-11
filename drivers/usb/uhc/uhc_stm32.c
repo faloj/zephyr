@@ -1029,6 +1029,8 @@ static int uhc_stm32_disable(const struct device *dev)
 		}
 	}
 
+	USB_DriveVbus(priv->hcd_ptr->Instance, 0);
+
 	HAL_StatusTypeDef status = HAL_HCD_Stop(priv->hcd_ptr);
 
 	if (status != HAL_OK) {
