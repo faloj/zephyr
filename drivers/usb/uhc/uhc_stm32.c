@@ -79,7 +79,7 @@ enum phy_interface {
 enum usb_speed {
 	USB_SPEED_INVALID = -1,
 	/* Values are fixed by maximum-speed enum values order in
-	 * usb-controller.yaml dts binding file
+	 * usb-controller.yaml dts binding file.
 	 */
 	USB_SPEED_LOW     =  0,
 	USB_SPEED_FULL    =  1,
@@ -201,7 +201,7 @@ static void uhc_stm32_irq(const struct device *dev)
 {
 	struct uhc_stm32_data *priv = uhc_get_private(dev);
 
-	/* Call the ST IRQ handler which will, in turn, call the corresponding HAL_HCD_* callbacks */
+	/* call the ST IRQ handler which will, in turn, call the corresponding HAL_HCD_* callbacks */
 	HAL_HCD_IRQHandler(priv->hcd_ptr);
 }
 
@@ -298,9 +298,9 @@ static int priv_clock_enable(struct uhc_stm32_data *const priv)
 			LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
 		} else {
 			/* ULPI clock is activated by default in sleep mode. If we use an
-			   other PHY this will prevent the USB_OTG_HS controller to work
-			   properly when the MCU enters sleep mode so we must disable it.
-			*/
+			 * other PHY this will prevent the USB_OTG_HS controller to work
+			 * properly when the MCU enters sleep mode so we must disable it.
+			 */
 			LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB1OTGHSULPI);
 		}
 	}
@@ -308,10 +308,10 @@ static int priv_clock_enable(struct uhc_stm32_data *const priv)
 	if (IS_USB_OTG_FS_DEVICE(priv->dev)) {
 		LL_AHB1_GRP1_EnableClockSleep(LL_AHB1_GRP1_PERIPH_USB2OTGHS);
 		/* USB_OTG_FS cannot be connected to an external ULPI PHY but
-		   ULPI clock is still activated by default in sleep mode
-		   (in run mode it is already disabled by default). This prevents
-		   the USB_OTG_FS controller to work properly when the MCU enters
-		   sleep mode so we must disable it.
+		 * ULPI clock is still activated by default in sleep mode
+		 * (in run mode it is already disabled by default). This prevents
+		 * the USB_OTG_FS controller to work properly when the MCU enters
+		 * sleep mode so we must disable it.
 		 */
 		LL_AHB1_GRP1_DisableClockSleep(LL_AHB1_GRP1_PERIPH_USB2OTGHSULPI);
 	}
@@ -345,7 +345,7 @@ static enum usb_speed priv_get_current_speed(struct uhc_stm32_data *const priv)
 		LOG_ERR("Invalid USB speed returned by \"HAL_HCD_GetCurrentSpeed\"");
 		__ASSERT_NO_MSG(0);
 
-		/* Falling back to low speed */
+		/* falling back to low speed */
 		speed = USB_SPEED_LOW;
 	}
 
@@ -574,7 +574,7 @@ static int priv_ongoing_xfer_run(struct uhc_stm32_data *const priv)
 		return priv_ongoing_xfer_control_run(priv, priv->ongoing_xfer);
 	} else {
 		/* TODO: For now all other xfer are considered as bulk transfers,
-		   add support for all type of transfer
+		 * add support for all type of transfer.
 		 */
 		return priv_ongoing_xfer_bulk_run(priv, priv->ongoing_xfer);
 	}
@@ -583,22 +583,22 @@ static int priv_ongoing_xfer_run(struct uhc_stm32_data *const priv)
 static int priv_ongoing_xfer_start_next(struct uhc_stm32_data *const priv)
 {
 	if (priv->ongoing_xfer != NULL) {
-		/* A transfer is already ongoing */
+		/* a transfer is already ongoing */
 		return 0;
 	}
 
 	priv->ongoing_xfer = uhc_xfer_get_next(priv->dev);
 
 	if (priv->ongoing_xfer == NULL) {
-		/* There is no xfer enqueued */
+		/* there is no xfer enqueued */
 		return 0;
 	}
 
 	priv->ongoing_xfer_attempts = 0;
 
 	/* Note: net_buf API does not offer a proper way to directly save the net_buf state
-	   so it's internal normally hidden net_buf_simple is saved instead
-	*/
+	 * so it's internal normally hidden net_buf_simple is saved instead
+	 */
 	net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 	memcpy(
 		&(priv->ongoing_xfer_pristine_buf_save),
@@ -606,7 +606,9 @@ static int priv_ongoing_xfer_start_next(struct uhc_stm32_data *const priv)
 		sizeof(struct net_buf_simple_state)
 	);
 
-	/* Retreive/open a pipe. This is temporary as the upper code does not manage pipes yet. */
+	/* Retreive corresponding pipe or open one if there is none.
+	 * Note: This is temporary as the upper code does not manage pipes yet.
+	 */
 	int err = priv_pipe_retreive_id(priv,
 		priv->ongoing_xfer->ep,
 		priv->ongoing_xfer->addr,
@@ -643,7 +645,7 @@ static void priv_ongoing_xfer_end(struct uhc_stm32_data *const priv, const int e
 	}
 
 	/* Close pipe if it is not the control pipe as it is supposed to stay oppened.
-	   This is temporary as the upper code does not manage pipes yet.
+	 * Note: This is temporary as the upper code does not manage pipes yet.
 	 */
 	if (USB_EP_GET_IDX(priv->ongoing_xfer->ep) != USB_CONTROL_ENDPOINT) {
 		int ret = priv_pipe_close(priv, priv->ongoing_xfer_pipe_id);
@@ -669,7 +671,7 @@ static void priv_ongoing_xfer_handle_timeout(struct uhc_stm32_data *const priv)
 	if (priv->ongoing_xfer->timeout == 0) {
 		priv_ongoing_xfer_end(priv, -ETIMEDOUT);
 
-		/* There may be more xfer to handle, submit a work to handle the next one */
+		/* there may be more xfer to handle, submit a work to handle the next one */
 		k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 	}
 }
@@ -684,8 +686,9 @@ static void priv_ongoing_xfer_update_handle_err(struct uhc_stm32_data *const pri
 		return;
 	}
 
-	/* In case of control transaction, restart from the SETUP stage. This won't have any effect
-	   on any othe transaction type. */
+	/* Restart from the SETUP stage. This is only usefull in case of control transfer and won't
+	 * have any effect in case of other transaction type.
+	 */
 	priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_SETUP;
 
 	/* restore net buf to it's pristine state, to be able to re-run the whole transmission */
@@ -699,36 +702,37 @@ static void priv_ongoing_xfer_update_handle_err(struct uhc_stm32_data *const pri
 
 static void priv_ongoing_xfer_control_stage_update(struct uhc_stm32_data *const priv)
 {
-	/* The last transfer block succeded, reset the failed attempts counter. */
+	/* the last transfer block succeded, reset the failed attempts counter */
 	priv->ongoing_xfer_attempts = 0;
 
 	if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_SETUP) {
 		if (priv->ongoing_xfer->buf != NULL) {
-			/* Next state is data stage */
+			/* next state is data stage */
 			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_DATA;
 		} else {
-			/* There is no data so jump directly to the status stage */
+			/* there is no data so jump directly to the status stage */
 			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
 		}
 	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
 		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
 			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
-			 /* No more data left to receive. Go to the status stage */
+			 /* no more data left to receive, go to the status stage */
 			 priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
 		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
 				   priv->ongoing_xfer->buf->len == 0) {
-			/* No more data left to send. Go to the status stage */
+			/* no more data left to send, go to the status stage */
 			priv->ongoing_xfer->stage = UHC_CONTROL_STAGE_STATUS;
 		} else {
 			/* The transmission succeded so far. Save the actual net_buf state in case the
-			   following partial data transmission fails so we can try to send it again. */
+			 * following partial data transmission fails so we can try to send it again.
+			 */
 			net_buf_simple_save(&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save));
 		}
 	} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
-		/* Transfer is completed */
+		/* transfer is completed */
 		priv_ongoing_xfer_end(priv, 0);
 	} else {
-		/* This is not supposed to happen */
+		/* this is not supposed to happen */
 		__ASSERT_NO_MSG(0);
 	}
 }
@@ -757,7 +761,7 @@ static int priv_ongoing_xfer_control_update(struct uhc_stm32_data *const priv)
 			priv_ongoing_xfer_update_handle_err(priv);
 		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_DATA) {
 			if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
-				/* Restore net buf to the last state, to be able to re-run the transmission */
+				/* restore net buf to the last state, to be able to re-run the transmission */
 				net_buf_simple_restore(
 					&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
 				);
@@ -767,7 +771,7 @@ static int priv_ongoing_xfer_control_update(struct uhc_stm32_data *const priv)
 			}
 		} else if (priv->ongoing_xfer->stage == UHC_CONTROL_STAGE_STATUS) {
 			if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep)) {
-				/* Restore net buf to the last state, to be able to re-run the transmission */
+				/* restore net buf to the last state, to be able to re-run the transmission */
 				net_buf_simple_restore(
 					&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
 				);
@@ -798,11 +802,11 @@ static int priv_ongoing_xfer_bulk_update(struct uhc_stm32_data *const priv)
 	if (urb_state == URB_DONE) {
 		if (USB_EP_DIR_IS_IN(priv->ongoing_xfer->ep) &&
 			net_buf_tailroom(priv->ongoing_xfer->buf) == 0) {
-			/* No more data left to receive, transmission succeeded */
+			/* no more data left to receive, transmission succeeded */
 			priv_ongoing_xfer_end(priv, 0);
 		} else if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep) &&
 				   priv->ongoing_xfer->buf->len == 0) {
-			/* No more data left to send, transmission succeeded */
+			/* no more data left to send, transmission succeeded */
 			priv_ongoing_xfer_end(priv, 0);
 		}
 	} else if (urb_state == URB_ERROR) {
@@ -811,8 +815,9 @@ static int priv_ongoing_xfer_bulk_update(struct uhc_stm32_data *const priv)
 		priv_ongoing_xfer_end(priv, -EPIPE);
 	} else if (urb_state == URB_NOTREADY) {
 		if (USB_EP_DIR_IS_OUT(priv->ongoing_xfer->ep)) {
-			/* Restore net buf to the last state, to be able to re-run this part
-			   of the transmission */
+			/* Restore net buf to the last state, to be able to re-run
+			 * this part of the transmission.
+			 */
 			net_buf_simple_restore(
 				&(priv->ongoing_xfer->buf->b), &(priv->ongoing_xfer_buf_save)
 			);
@@ -828,7 +833,7 @@ static int priv_ongoing_xfer_bulk_update(struct uhc_stm32_data *const priv)
 	}
 
 	if (priv->ongoing_xfer != NULL) {
-		/* Transfer is not completed yet, continue the transmission */
+		/* transfer is not completed yet, continue the transmission */
 		return priv_ongoing_xfer_run(priv);
 	}
 
@@ -838,7 +843,7 @@ static int priv_ongoing_xfer_bulk_update(struct uhc_stm32_data *const priv)
 static int priv_ongoing_xfer_update(struct uhc_stm32_data *const priv)
 {
 	if (priv->ongoing_xfer == NULL) {
-		/* There is no ongoing transfer */
+		/* there is no ongoing transfer */
 		return 0;
 	}
 
@@ -846,13 +851,13 @@ static int priv_ongoing_xfer_update(struct uhc_stm32_data *const priv)
 		return priv_ongoing_xfer_control_update(priv);
 	} else {
 		/* TODO: For now all other xfer are considered as bulk transfers,
-		   add support for all type of transfer
+		 * add support for all type of transfer.
 		 */
 		return priv_ongoing_xfer_bulk_update(priv);
 	}
 
 	if (priv->ongoing_xfer == NULL) {
-		/* There may be more xfer to handle, submit a work to handle the next one */
+		/* there may be more xfer to handle, submit a work to handle the next one */
 		k_work_submit_to_queue(&priv->work_queue, &priv->on_schedule_new_xfer_work);
 	}
 
@@ -1055,7 +1060,7 @@ static int uhc_stm32_disable(const struct device *dev)
 	priv_clear(priv);
 
 	if (priv->state == STM32_UHC_STATE_READY) {
-		/* Let higher level code know the device is not reachable anymore */
+		/* let higher level code know the device is not reachable anymore */
 		uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
 	}
 
@@ -1105,7 +1110,7 @@ static int uhc_stm32_bus_reset(const struct device *dev)
 
 static int uhc_stm32_sof_enable(const struct device *dev)
 {
-	/* Nothing to do */
+	/* nothing to do */
 	return 0;
 }
 
@@ -1286,13 +1291,14 @@ void priv_on_port_connect_disconnect(struct k_work *work)
 
 	if (connected) {
 		if (priv->state == STM32_UHC_STATE_READY) {
-			/* a spurious disconnection occured, cancel ongoing transfer and clear pending works,
-			   and let higher level code know a disconnection occurred */
+			/* A spurious disconnection occured, cancel ongoing transfer, clear pending works,
+			 * and let higher level code know a disconnection occurred.
+			 */
 			priv_clear(priv);
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_REMOVED, 0);
 		}
 
-		/* launch a (re)enumeration. */
+		/* launch a speed enumeration. */
 		priv->state = STM32_UHC_STATE_SPEED_ENUM;
 		k_work_reschedule_for_queue(&priv->work_queue, &priv->delayed_enum_reset_work, K_MSEC(200));
 	} else {
@@ -1332,7 +1338,7 @@ void priv_on_reset(struct k_work *work)
 			uhc_submit_event(priv->dev, UHC_EVT_DEV_CONNECTED_HS, 0);
 		}
 	} else {
-		/* Let higher level code know a reset occurred */
+		/* let higher level code know a reset occurred */
 		uhc_submit_event(priv->dev, UHC_EVT_RESETED, 0);
 	}
 
