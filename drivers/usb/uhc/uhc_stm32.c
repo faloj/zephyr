@@ -953,9 +953,20 @@ static int uhc_stm32_init(const struct device *dev)
 			LOG_ERR("ULPI reset gpio is not ready");
 			return -ENODEV;
 		}
-		err = gpio_pin_configure_dt(&config->ulpi_reset_gpio, GPIO_OUTPUT_INACTIVE);
+
+		/* configure the reset pin and activate it */
+		err = gpio_pin_configure_dt(&config->ulpi_reset_gpio, GPIO_OUTPUT_ACTIVE);
 		if (err) {
 			LOG_ERR("Failed to configure ULPI reset gpio (%d)", err);
+			return err;
+		}
+
+		k_usleep(10);
+
+		/* release the reset pin */
+		err = gpio_pin_set_dt(&config->ulpi_reset_gpio, 0);
+		if (err) {
+			LOG_ERR("Failed to release ULPI reset pin (%d)", err);
 			return err;
 		}
 	}
